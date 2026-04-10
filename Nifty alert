@@ -1,0 +1,139 @@
+import yfinance as yf
+import requests
+import time
+from datetime import datetime, time as dtime
+import pytz
+
+# =============================================
+# CONFIG - Apna Token aur Chat ID yahan hai
+# =============================================
+TELEGRAM_TOKEN = "8754909402:AAGiudQUtZQeG_LjzF4LcFJ5ca9ScUD7ZN0"
+CHAT_ID = "948684099"
+SYMBOL = "^NSEI"  # Nifty 50
+
+# =============================================
+# MARKET HOURS (IST)
+# =============================================
+IST = pytz.timezone("Asia/Kolkata")
+MARKET_OPEN = dtime(9, 15)
+MARKET_CLOSE = dtime(15, 30)
+
+def is_market_open():
+    now = datetime.now(IST).time()
+    today = datetime.now(IST).weekday()  # 0=Mon, 6=Sun
+    if today >= 5:  # Weekend
+        return False
+    return MARKET_OPEN <= now <= MARKET_CLOSE
+
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            print(f"✅ Alert sent: {message}")
+        else:
+            print(f"❌ Alert failed: {response.text}")
+    except Exception as e:
+        print(f"❌ Error sending alert: {e}")
+
+def get_candles():
+    try:
+        ticker = yf.Ticker(SYMBOL)
+        df = ticker.history(period="1d", interval="5m")
+        if df.empty or len(df) < 5:
+            return None
+        return df
+    except Exception as e:
+        print(f"❌ Data fetch error: {e}")
+        return None
+
+def check_pattern(df):
+    """
+    Pattern: 3 ya zyada consecutive GREEN candles
+    uske baad 4th candle RED ho
+    """
+    if df is None or len(df) < 4:
+        return False, 0, 0, 0
+
+    # Last 6 candles check karo
+    candles = df.tail(6)
+
+    closes = candles['Close'].values
+    opens = candles['Open'].values
+
+    # Green = close > open, Red = close < open
+    is_green = [closes[i] > opens[i] for i in range(len(closes))]
+
+    # Check: last candle RED, usse pehle 3+ GREEN
+    n = len(is_green)
+
+    # Last candle red hona chahiye
+    if is_green[n-1]:
+        return False, 0, 0, 0
+
+    # Count consecutive greens before last candle
+    green_count = 0
+    for i in range(n-2, -1, -1):
+        if is_green[i]:
+            green_count += 1
+        else:
+            break
+
+    if green_count >= 3:
+        last_close = closes[n-1]
+        last_open = opens[n-1]
+        pattern_start_price = opens[n-1-green_count]
+        return True, green_count, last_close, last_open
+
+    return False, 0, 0, 0
+
+def main():
+    print("🚀 Nifty 50 Alert System Started!")
+    print(f"📊 Monitoring: {SYMBOL}")
+    print(f"⏰ Market Hours: 9:15 AM - 3:30 PM IST")
+    print("=" * 40)
+
+    last_alert_time = None
+
+    while True:
+        now = datetime.now(IST)
+        print(f"[{now.strftime('%H:%M:%S')}] Checking...", end=" ")
+
+        if not is_market_open():
+            print("Market closed. Waiting...")
+            time.sleep(60)
+            continue
+
+        df = get_candles()
+        pattern_found, green_count, close_price, open_price = check_pattern(df)
+
+        if pattern_found:
+            # Same candle pe double alert mat bhejo
+            current_candle_time = df.index[-1]
+            if last_alert_time != current_candle_time:
+                last_alert_time = current_candle_time
+
+                message = (
+                    f"🔴 <b>NIFTY 50 ALERT!</b>\n\n"
+                    f"📉 Pattern Detected: {green_count} Green → Red Candle\n"
+                    f"🕐 Time: {now.strftime('%H:%M:%S')} IST\n"
+                    f"📊 Candle Open: {open_price:.2f}\n"
+                    f"📊 Candle Close: {close_price:.2f}\n\n"
+                    f"⚠️ Possible reversal — check your setup!"
+                )
+                send_telegram_alert(message)
+            else:
+                print("Pattern found but already alerted for this candle.")
+        else:
+            print("No pattern.")
+
+        # 5 min chart ke liye har 60 sec check karo
+        time.sleep(60)
+
+if __name__ == "__main__":
+    main()
