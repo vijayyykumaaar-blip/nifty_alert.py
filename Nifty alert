@@ -1,14 +1,28 @@
 import requests
 import time
+import os
 from datetime import datetime, time as dtime
 import pytz
 
+# =============================================
+# CONFIG
+# =============================================
 TELEGRAM_TOKEN = "8754909402:AAGiudQUtZQeG_LjzF4LcFJ5ca9ScUD7ZN0"
 CHAT_ID = "948684099"
+UPSTOX_TOKEN = os.environ.get("UPSTOX_TOKEN")
 
 IST = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
-MARKET_CLOSE = dtime(15, 30)
+MARKET_CLOSE = dtime(15, 0)
+
+def send_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=10)
+        print(f"✅ Alert sent!")
+    except Exception as e:
+        print(f"❌ Alert error: {e}")
 
 def is_market_open():
     now = datetime.now(IST).time()
@@ -17,78 +31,178 @@ def is_market_open():
         return False
     return MARKET_OPEN <= now <= MARKET_CLOSE
 
-def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Error: {e}")
-
-def get_nse_candles():
+def get_candles():
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*",
-            "Referer": "https://www.nseindia.com"
+            "Authorization": f"Bearer {UPSTOX_TOKEN}",
+            "Accept": "application/json"
         }
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        url = "https://www.nseindia.com/api/chart-databyindex?index=NIFTY 50&indices=true"
-        response = session.get(url, headers=headers, timeout=10)
+        url = "https://api.upstox.com/v2/historical-candle/intraday/NSE_INDEX|Nifty%2050/5minute"
+        response = requests.get(url, headers=headers, timeout=10)
         data = response.json()
-        candles = data['grapthData']
+
+        if data.get('status') != 'success':
+            print(f"API Error: {data}")
+            return None
+
+        candles = data['data']['candles']
+        if len(candles) < 5:
+            return None
+
         result = []
-        for c in candles[-10:]:
-            result.append({'open': c[1], 'close': c[4]})
+        for c in candles[-20:]:
+            result.append({
+                'time': c[0],
+                'open': float(c[1]),
+                'high': float(c[2]),
+                'low': float(c[3]),
+                'close': float(c[4])
+            })
         return result
+
     except Exception as e:
-        print(f"NSE Error: {e}")
+        print(f"❌ Data fetch error: {e}")
         return None
 
-def check_pattern(candles):
+def get_historical_levels():
+    try:
+        headers = {
+            "Authorization": f"Bearer {UPSTOX_TOKEN}",
+            "Accept": "application/json"
+        }
+        url = "https://api.upstox.com/v2/historical-candle/NSE_INDEX|Nifty%2050/day/2025-01-01/2026-04-12"
+        response = requests.get(url, headers=headers, timeout=10)
+        data = response.json()
+
+        if data.get('status') != 'success':
+            return []
+
+        levels = []
+        for c in data['data']['candles']:
+            levels.extend([
+                round(float(c[1]), 2),
+                round(float(c[2]), 2),
+                round(float(c[3]), 2),
+                round(float(c[4]), 2)
+            ])
+        return sorted(set(levels))
+
+    except Exception as e:
+        print(f"❌ Historical levels error: {e}")
+        return []
+
+def near_level(price, levels, tolerance=0.003):
+    for level in levels:
+        diff = abs(level - price) / price
+        if diff <= tolerance:
+            return True, level
+    return False, None
+
+def find_support(price, levels):
+    support_levels = [l for l in levels if l < price]
+    if support_levels:
+        return support_levels[-1]
+    return None
+
+def check_setup(candles, all_levels, day_high):
     if candles is None or len(candles) < 4:
-        return False, 0
-    is_green = [c['close'] > c['open'] for c in candles]
-    n = len(is_green)
-    if is_green[n-1]:
-        return False, 0
-    green_count = 0
-    for i in range(n-2, -1, -1):
-        if is_green[i]:
-            green_count += 1
-        else:
-            break
-    if green_count >= 3:
-        return True, green_count
-    return False, 0
+        return False, None
+
+    current = candles[-1]
+    current_price = current['close']
+
+    is_red = current['close'] < current['open']
+    if not is_red:
+        return False, None
+
+    near_today = abs(current_price - day_high) / current_price <= 0.003
+    near_hist, hist_level = near_level(current_price, all_levels)
+
+    if not (near_today or near_hist):
+        return False, None
+
+    if near_today and near_hist:
+        resistance = min(day_high, hist_level)
+    elif near_today:
+        resistance = day_high
+    else:
+        resistance = hist_level
+
+    support = find_support(resistance, all_levels)
+    if support is None:
+        return False, None
+
+    target = resistance - ((resistance - support) / 2)
+    stop_loss = resistance + 30
+
+    return True, {
+        'entry': round(current_price, 2),
+        'resistance': round(resistance, 2),
+        'support': round(support, 2),
+        'target': round(target, 2),
+        'stop_loss': round(stop_loss, 2)
+    }
 
 def main():
-    print("Nifty 50 NSE Live Alert Started!")
-    last_alert_candle = None
+    print("🚀 Nifty 50 Alert System Started!")
+    print("📊 Strategy: Resistance + 50% S/R Target + 30pt SL")
+
+    last_alert_time = None
+    traded_today = None
+    day_high = 0
+    all_levels = []
+
     while True:
         now = datetime.now(IST)
+
         if not is_market_open():
-            print("Market closed. Waiting...")
+            print(f"[{now.strftime('%H:%M')}] Market closed.")
+            traded_today = None
+            day_high = 0
+            all_levels = []
             time.sleep(60)
             continue
-        candles = get_nse_candles()
-        pattern_found, green_count = check_pattern(candles)
-        if pattern_found:
-            last_candle = str(candles[-1])
-            if last_alert_candle != last_candle:
-                last_alert_candle = last_candle
-                message = (
-                    f"🔴 <b>NIFTY 50 ALERT!</b>\n\n"
-                    f"📉 Pattern: {green_count} Green → Red Candle\n"
-                    f"🕐 Time: {now.strftime('%H:%M:%S')} IST\n"
-                    f"📊 Close: {candles[-1]['close']:.2f}\n\n"
-                    f"⚠️ Possible reversal!"
-                )
-                send_telegram_alert(message)
-                print(f"Alert sent!")
-        else:
-            print(f"[{now.strftime('%H:%M')}] No pattern.")
+
+        today = now.date()
+
+        if len(all_levels) == 0:
+            print("📈 Historical levels load ho rahe hain...")
+            all_levels = get_historical_levels()
+            print(f"✅ {len(all_levels)} levels loaded!")
+
+        candles = get_candles()
+
+        if candles:
+            for c in candles:
+                if c['high'] > day_high:
+                    day_high = c['high']
+
+            if traded_today != today:
+                setup_found, setup = check_setup(candles, all_levels, day_high)
+
+                if setup_found:
+                    current_candle_time = candles[-1]['time']
+
+                    if last_alert_time != current_candle_time:
+                        last_alert_time = current_candle_time
+                        traded_today = today
+
+                        message = (
+                            f"🔴 <b>NIFTY 50 - PUT ALERT!</b>\n\n"
+                            f"📍 Resistance: {setup['resistance']}\n"
+                            f"📉 Entry: {setup['entry']}\n"
+                            f"🎯 Target: {setup['target']}\n"
+                            f"🛑 Stop Loss: {setup['stop_loss']}\n"
+                            f"💪 Support: {setup['support']}\n"
+                            f"🕐 Time: {now.strftime('%H:%M:%S')} IST\n\n"
+                            f"⚠️ Resistance pe red candle!"
+                        )
+                        send_alert(message)
+                else:
+                    print(f"[{now.strftime('%H:%M')}] No setup. Day High: {day_high}")
+            else:
+                print(f"[{now.strftime('%H:%M')}] Already traded today!")
+
         time.sleep(60)
 
 if __name__ == "__main__":
