@@ -11,6 +11,7 @@ UPSTOX_API_KEY = os.environ.get("UPSTOX_API_KEY")
 
 IST = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
+TRADE_START = dtime(9, 40)
 MARKET_CLOSE = dtime(15, 0)
 LOT_SIZE = 65
 TOLERANCE = 0.002
@@ -33,6 +34,10 @@ def is_market_open():
     if today >= 5:
         return False
     return MARKET_OPEN <= now <= MARKET_CLOSE
+
+def can_trade():
+    now = datetime.now(IST).time()
+    return now >= TRADE_START
 
 def get_headers():
     return {
@@ -82,6 +87,9 @@ def get_candles():
                 'low': float(c[3]),
                 'close': float(c[4])
             })
+        # Pehla candle (9:15-9:20) ignore karo
+        if len(result) > 0:
+            result = result[:-1]
         return result
     except Exception as e:
         print(f"❌ Candle fetch error: {e}")
@@ -217,6 +225,7 @@ def find_support(price, levels):
 def main():
     print("🚀 Nifty 50 ALGO TRADING System Started!")
     print(f"📊 LOT: {LOT_SIZE} | TOLERANCE: {TOLERANCE*100}% | SL: {SL_POINTS} pts")
+    print(f"⏰ Trade start time: 9:40 AM | First candle ignored")
 
     traded_today = None
     day_high = 0
@@ -332,6 +341,12 @@ def main():
                 print(f"[{now.strftime('%H:%M')}] Trade active. Waiting...")
 
         elif not in_trade and traded_today != today:
+
+            if not can_trade():
+                print(f"[{now.strftime('%H:%M')}] 9:40 AM ka wait kar rahe hain...")
+                time.sleep(60)
+                continue
+
             is_red = last_closed['close'] < last_closed['open']
 
             if not is_red:
