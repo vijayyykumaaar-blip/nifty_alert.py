@@ -11,11 +11,15 @@ UPSTOX_API_KEY = os.environ.get("UPSTOX_API_KEY")
 
 IST = pytz.timezone("Asia/Kolkata")
 MARKET_OPEN = dtime(9, 15)
+OBSERVE_START = dtime(9, 20)
 TRADE_START = dtime(9, 40)
 MARKET_CLOSE = dtime(15, 0)
 LOT_SIZE = 65
-TOLERANCE = 0.002
-SL_POINTS = 30
+TOLERANCE = 0.001
+HIST_TOLERANCE = 0.002
+SL_POINTS = 20
+TRAIL_TRIGGER = 40
+TRAIL_STEP = 10
 DELTA_MIN = 0.20
 DELTA_MAX = 0.25
 
@@ -35,9 +39,11 @@ def is_market_open():
         return False
     return MARKET_OPEN <= now <= MARKET_CLOSE
 
+def can_observe():
+    return datetime.now(IST).time() >= OBSERVE_START
+
 def can_trade():
-    now = datetime.now(IST).time()
-    return now >= TRADE_START
+    return datetime.now(IST).time() >= TRADE_START
 
 def get_headers():
     return {
@@ -48,7 +54,7 @@ def get_headers():
 def get_historical_levels():
     try:
         end = datetime.now(IST).strftime("%Y-%m-%d")
-        start = (datetime.now(IST) - timedelta(days=90)).strftime("%Y-%m-%d")
+        start = (datetime.now(IST) - timedelta(days=28)).strftime("%Y-%m-%d")
         url = f"https://api.upstox.com/v2/historical-candle/NSE_INDEX|Nifty%2050/day/{start}/{end}"
         response = requests.get(url, headers=get_headers(), timeout=10)
         data = response.json()
@@ -76,7 +82,7 @@ def get_candles():
         if data.get('status') != 'success':
             return None
         candles = data['data']['candles']
-        if len(candles) < 2:
+        if len(candles) < 3:
             return None
         result = []
         for c in candles:
@@ -87,12 +93,23 @@ def get_candles():
                 'low': float(c[3]),
                 'close': float(c[4])
             })
-        # Pehla candle (9:15-9:20) ignore karo
-        if len(result) > 0:
-            result = result[:-1]
+        result = [c for c in result if c['time'][11:16] >= '09:20']
         return result
     except Exception as e:
         print(f"❌ Candle fetch error: {e}")
+        return None
+
+def get_nifty_ltp():
+    try:
+        url = "https://api.upstox.com/v2/market-quote/ltp?instrument_key=NSE_INDEX%7CNifty%2050"
+        response = requests.get(url, headers=get_headers(), timeout=10)
+        data = response.json()
+        if data.get('status') == 'success':
+            ltp = list(data['data'].values())[0]['last_price']
+            return float(ltp)
+        return None
+    except Exception as e:
+        print(f"❌ Nifty LTP error: {e}")
         return None
 
 def get_weekly_expiry():
@@ -110,7 +127,6 @@ def get_put_strike():
         response = requests.get(url, headers=get_headers(), timeout=10)
         data = response.json()
         if data.get('status') != 'success':
-            print(f"Option chain error: {data}")
             return None, None, None, None
         best_strike = None
         best_delta = None
@@ -209,36 +225,34 @@ def get_current_premium(instrument_key):
         print(f"❌ Premium fetch error: {e}")
         return None
 
-def near_level(price, levels, tolerance=TOLERANCE):
+def near_historical(price, levels, tolerance=HIST_TOLERANCE):
     for level in levels:
-        diff = abs(level - price) / price
-        if diff <= tolerance:
-            return True, level
-    return False, None
-
-def find_support(price, levels):
-    support_levels = [l for l in levels if l < price]
-    if support_levels:
-        return support_levels[-1]
-    return None
+        if abs(level - price) / price <= tolerance:
+            return True
+    return False
 
 def main():
     print("🚀 Nifty 50 ALGO TRADING System Started!")
-    print(f"📊 LOT: {LOT_SIZE} | TOLERANCE: {TOLERANCE*100}% | SL: {SL_POINTS} pts")
-    print(f"⏰ Trade start time: 9:40 AM | First candle ignored")
+    print(f"📊 LOT: {LOT_SIZE} | SL: {SL_POINTS}pts | Trail: {TRAIL_TRIGGER}pts trigger, {TRAIL_STEP}pts step")
+    print(f"⏰ Observe: 9:20 AM | Trade: 9:40 AM")
 
     traded_today = None
     day_high = 0
+    came_down = False
     all_levels = []
     in_trade = False
     entry_nifty_price = None
     entry_premium = None
     sl_level = None
-    target_level = None
+    trail_trigger_level = None
     instrument_key = None
     strike = None
     entry_delta = None
     resistance = None
+    hist_confirmed = False
+    trailing_active = False
+    lowest_nifty = None
+    trail_stop = None
 
     while True:
         now = datetime.now(IST)
@@ -249,21 +263,26 @@ def main():
             if traded_today is not None and traded_today != today:
                 traded_today = None
                 day_high = 0
+                came_down = False
                 all_levels = []
                 in_trade = False
                 entry_nifty_price = None
                 entry_premium = None
                 sl_level = None
-                target_level = None
+                trail_trigger_level = None
                 instrument_key = None
                 strike = None
                 entry_delta = None
                 resistance = None
+                hist_confirmed = False
+                trailing_active = False
+                lowest_nifty = None
+                trail_stop = None
             time.sleep(60)
             continue
 
         if len(all_levels) == 0:
-            print("📈 3 mahine ke historical levels load ho rahe hain...")
+            print("📈 20 din ke historical levels load ho rahe hain...")
             all_levels = get_historical_levels()
             if len(all_levels) == 0:
                 send_alert("⚠️ Historical levels load nahi hue!")
@@ -278,15 +297,21 @@ def main():
             continue
 
         last_closed = candles[-2]
+        prev_closed = candles[-3] if len(candles) >= 3 else None
         nifty_close = last_closed['close']
 
-        for c in candles:
-            if c['high'] > day_high:
-                day_high = c['high']
+        if can_observe():
+            for c in candles:
+                if c['high'] > day_high:
+                    day_high = c['high']
+                    came_down = False
+            if day_high > 0 and nifty_close < day_high * (1 - TOLERANCE):
+                came_down = True
 
         if in_trade and instrument_key:
+            nifty_ltp = get_nifty_ltp()
             current_premium = get_current_premium(instrument_key)
-            print(f"[{now.strftime('%H:%M')}] IN TRADE | Close: {nifty_close} | SL: {sl_level} | Target: {target_level}")
+            print(f"[{now.strftime('%H:%M')}] IN TRADE | LTP: {nifty_ltp} | SL: {sl_level} | Trail: {trail_stop} | Active: {trailing_active}")
 
             if now.time() >= dtime(15, 0):
                 exit_order(instrument_key)
@@ -302,81 +327,112 @@ def main():
                     f"🕐 Time: {now.strftime('%H:%M')} IST"
                 )
                 in_trade = False
+                trailing_active = False
+                lowest_nifty = None
+                trail_stop = None
                 time.sleep(60)
                 continue
 
-            if nifty_close >= sl_level:
-                exit_order(instrument_key)
-                curr_prem = get_current_premium(instrument_key) or entry_premium
-                pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
-                send_alert(
-                    f"❌ <b>SL HIT!</b>\n\n"
-                    f"📊 Strike: {strike} PE\n"
-                    f"📍 Resistance: {resistance}\n"
-                    f"🛑 SL: {sl_level}\n"
-                    f"💰 Entry Premium: ₹{entry_premium}\n"
-                    f"💰 Exit Premium: ₹{curr_prem}\n"
-                    f"📉 Loss: ₹{abs(pnl)}\n"
-                    f"🕐 Time: {now.strftime('%H:%M')} IST"
-                )
-                in_trade = False
+            if nifty_ltp:
+                if nifty_close >= sl_level:
+                    exit_order(instrument_key)
+                    curr_prem = get_current_premium(instrument_key) or entry_premium
+                    pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
+                    send_alert(
+                        f"❌ <b>SL HIT!</b>\n\n"
+                        f"📊 Strike: {strike} PE\n"
+                        f"📍 Resistance: {resistance}\n"
+                        f"🛑 SL: {sl_level}\n"
+                        f"💰 Entry Premium: ₹{entry_premium}\n"
+                        f"💰 Exit Premium: ₹{curr_prem}\n"
+                        f"📉 Loss: ₹{abs(pnl)}\n"
+                        f"🕐 Time: {now.strftime('%H:%M')} IST"
+                    )
+                    in_trade = False
+                    trailing_active = False
+                    lowest_nifty = None
+                    trail_stop = None
 
-            elif nifty_close <= target_level:
-                exit_order(instrument_key)
-                curr_prem = get_current_premium(instrument_key) or entry_premium
-                pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
-                send_alert(
-                    f"✅ <b>PROFIT EXIT!</b>\n\n"
-                    f"📊 Strike: {strike} PE\n"
-                    f"📍 Resistance: {resistance}\n"
-                    f"🎯 Target: {target_level}\n"
-                    f"💰 Entry Premium: ₹{entry_premium}\n"
-                    f"💰 Exit Premium: ₹{curr_prem}\n"
-                    f"📈 Profit: ₹{pnl}\n"
-                    f"🕐 Time: {now.strftime('%H:%M')} IST"
-                )
-                in_trade = False
+                elif trailing_active and trail_stop:
+                    if nifty_ltp < lowest_nifty:
+                        lowest_nifty = nifty_ltp
+                        trail_stop = round(lowest_nifty + TRAIL_STEP, 2)
+                        print(f"📉 New low! {lowest_nifty} | Trail: {trail_stop}")
 
-            else:
-                print(f"[{now.strftime('%H:%M')}] Trade active. Waiting...")
+                    if nifty_ltp >= trail_stop:
+                        exit_order(instrument_key)
+                        curr_prem = get_current_premium(instrument_key) or entry_premium
+                        pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
+                        send_alert(
+                            f"✅ <b>PROFIT EXIT (Trail)!</b>\n\n"
+                            f"📊 Strike: {strike} PE\n"
+                            f"📍 Resistance: {resistance}\n"
+                            f"🎯 Trail Stop: {trail_stop}\n"
+                            f"💰 Entry Premium: ₹{entry_premium}\n"
+                            f"💰 Exit Premium: ₹{curr_prem}\n"
+                            f"📈 Profit: ₹{pnl}\n"
+                            f"🕐 Time: {now.strftime('%H:%M')} IST"
+                        )
+                        in_trade = False
+                        trailing_active = False
+                        lowest_nifty = None
+                        trail_stop = None
+
+                elif not trailing_active:
+                    if nifty_ltp <= trail_trigger_level:
+                        trailing_active = True
+                        lowest_nifty = nifty_ltp
+                        trail_stop = round(lowest_nifty + TRAIL_STEP, 2)
+                        print(f"🎯 Trailing activated! LTP: {nifty_ltp} | Trail: {trail_stop}")
+                        send_alert(
+                            f"🎯 <b>TRAILING ACTIVATED!</b>\n\n"
+                            f"📉 Nifty: {nifty_ltp}\n"
+                            f"🔒 Trail Stop: {trail_stop}\n"
+                            f"🕐 Time: {now.strftime('%H:%M')} IST"
+                        )
 
         elif not in_trade and traded_today != today:
-
             if not can_trade():
-                print(f"[{now.strftime('%H:%M')}] 9:40 AM ka wait kar rahe hain...")
+                print(f"[{now.strftime('%H:%M')}] 9:40 AM ka wait...")
                 time.sleep(60)
                 continue
 
-            is_red = last_closed['close'] < last_closed['open']
-
-            if not is_red:
-                print(f"[{now.strftime('%H:%M')}] Candle green. No entry.")
+            if prev_closed is None or not (prev_closed['close'] > prev_closed['open']):
+                print(f"[{now.strftime('%H:%M')}] Prev candle not green.")
                 time.sleep(60)
                 continue
 
-            near_today = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
-            near_hist, hist_level = near_level(nifty_close, all_levels)
-
-            if not (near_today or near_hist):
-                print(f"[{now.strftime('%H:%M')}] No resistance. Price: {nifty_close} | High: {day_high}")
+            if not (last_closed['close'] < last_closed['open']):
+                print(f"[{now.strftime('%H:%M')}] Candle not red.")
                 time.sleep(60)
                 continue
 
-            if near_today and near_hist:
-                resistance = min(day_high, hist_level)
-            elif near_today:
-                resistance = day_high
-            else:
-                resistance = hist_level
-
-            support = find_support(resistance, all_levels)
-            if support is None:
-                print("No support found!")
+            if not came_down:
+                print(f"[{now.strftime('%H:%M')}] came_down nahi hua.")
                 time.sleep(60)
                 continue
+
+            if day_high == 0:
+                print(f"[{now.strftime('%H:%M')}] Day high not set.")
+                time.sleep(60)
+                continue
+
+            near_high = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
+            below_high = nifty_close < day_high
+
+            if not (near_high and below_high):
+                print(f"[{now.strftime('%H:%M')}] Not near day high. Price: {nifty_close} | High: {day_high}")
+                time.sleep(60)
+                continue
+
+            resistance = day_high
+            hist_confirmed = near_historical(resistance, all_levels)
+            setup_type = "🔥 STRONG (Day High + Historical)" if hist_confirmed else "⚡ Normal (Day High only)"
+            print(f"✅ Setup found! {setup_type} | Resistance: {resistance}")
 
             sl_level = round(resistance + SL_POINTS, 2)
-            target_level = round(resistance - ((resistance - support) / 2), 2)
+            entry_nifty_price = nifty_close
+            trail_trigger_level = round(entry_nifty_price - TRAIL_TRIGGER, 2)
 
             strike, entry_delta, entry_premium, inst_key = get_put_strike()
 
@@ -390,18 +446,21 @@ def main():
             if order_id:
                 in_trade = True
                 traded_today = today
-                entry_nifty_price = nifty_close
                 instrument_key = inst_key
+                trailing_active = False
+                lowest_nifty = None
+                trail_stop = None
 
                 send_alert(
                     f"🔴 <b>PUT ENTRY!</b>\n\n"
                     f"📊 Strike: {strike} PE\n"
                     f"💰 Premium: ₹{entry_premium}\n"
                     f"📍 Resistance: {resistance}\n"
-                    f"🎯 Target: {target_level}\n"
+                    f"🎯 Trail Trigger: {trail_trigger_level}\n"
                     f"🛑 SL: {sl_level}\n"
                     f"📉 Delta: {entry_delta}\n"
                     f"📦 Qty: {LOT_SIZE} (1 lot)\n"
+                    f"🏷️ Setup: {setup_type}\n"
                     f"🕐 Time: {now.strftime('%H:%M')} IST"
                 )
         else:
