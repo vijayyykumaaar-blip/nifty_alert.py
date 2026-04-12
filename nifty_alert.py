@@ -15,8 +15,8 @@ OBSERVE_START = dtime(9, 20)
 TRADE_START = dtime(9, 40)
 MARKET_CLOSE = dtime(15, 0)
 LOT_SIZE = 65
-TOLERANCE = 0.001
-HIST_TOLERANCE = 0.002
+TOLERANCE = 0.002        # 0.2% range
+HIST_TOLERANCE = 0.002   # 0.2% historical match
 SL_POINTS = 20
 TRAIL_TRIGGER = 40
 TRAIL_STEP = 10
@@ -305,7 +305,7 @@ def main():
                 if c['high'] > day_high:
                     day_high = c['high']
                     came_down = False
-            if day_high > 0 and nifty_close < day_high * (1 - TOLERANCE):
+            if day_high > 0 and nifty_close < day_high * 0.998:
                 came_down = True
 
         if in_trade and instrument_key:
@@ -417,6 +417,14 @@ def main():
                 time.sleep(60)
                 continue
 
+            # Market GIRTE samay mile - neeche ja rahi ho
+            falling = last_closed['close'] < prev_closed['close']
+            if not falling:
+                print(f"[{now.strftime('%H:%M')}] Market upar ja rahi hai - skip!")
+                time.sleep(60)
+                continue
+
+            # Price day high ke 0.2% paas aur NEECHE
             near_high = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
             below_high = nifty_close < day_high
 
@@ -470,3 +478,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
