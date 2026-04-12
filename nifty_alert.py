@@ -10,10 +10,10 @@ UPSTOX_TOKEN = os.environ.get("UPSTOX_TOKEN")
 UPSTOX_API_KEY = os.environ.get("UPSTOX_API_KEY")
 
 IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN = dtime(9, 15)
+MARKET_OPEN = dtime(8, 45)
 OBSERVE_START = dtime(9, 20)
 TRADE_START = dtime(9, 40)
-MARKET_CLOSE = dtime(15, 0)
+MARKET_CLOSE = dtime(15, 30)
 LOT_SIZE = 65
 TOLERANCE = 0.002        # 0.2% range
 HIST_TOLERANCE = 0.002   # 0.2% historical match
@@ -478,4 +478,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
