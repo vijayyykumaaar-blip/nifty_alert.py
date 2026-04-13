@@ -15,8 +15,8 @@ OBSERVE_START = dtime(9, 20)
 TRADE_START = dtime(9, 40)
 MARKET_CLOSE = dtime(15, 30)
 LOT_SIZE = 65
-TOLERANCE = 0.002        # 0.2% range
-HIST_TOLERANCE = 0.002   # 0.2% historical match
+TOLERANCE = 0.002
+HIST_TOLERANCE = 0.002
 SL_POINTS = 20
 TRAIL_TRIGGER = 40
 TRAIL_STEP = 10
@@ -55,7 +55,7 @@ def get_historical_levels():
     try:
         end = datetime.now(IST).strftime("%Y-%m-%d")
         start = (datetime.now(IST) - timedelta(days=28)).strftime("%Y-%m-%d")
-        url = f"https://api.upstox.com/v2/historical-candle/NSE_INDEX|Nifty%2050/day/{start}/{end}"
+        url = f"https://api.upstox.com/v2/historical-candle/NSE_INDEX|Nifty%2050/day/{end}/{start}"
         response = requests.get(url, headers=get_headers(), timeout=10)
         data = response.json()
         if data.get('status') != 'success':
@@ -417,14 +417,12 @@ def main():
                 time.sleep(60)
                 continue
 
-            # Market GIRTE samay mile - neeche ja rahi ho
             falling = last_closed['close'] < prev_closed['close']
             if not falling:
                 print(f"[{now.strftime('%H:%M')}] Market upar ja rahi hai - skip!")
                 time.sleep(60)
                 continue
 
-            # Price day high ke 0.2% paas aur NEECHE
             near_high = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
             below_high = nifty_close < day_high
 
@@ -478,4 +476,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
