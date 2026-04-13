@@ -82,7 +82,7 @@ def get_candles():
         if data.get('status') != 'success':
             return None
         candles = data['data']['candles']
-        if len(candles) < 3:
+        if len(candles) < 1:
             return None
         result = []
         for c in candles:
@@ -93,8 +93,9 @@ def get_candles():
                 'low': float(c[3]),
                 'close': float(c[4])
             })
+        # 9:15-9:20 pehla candle ignore
         result = [c for c in result if c['time'][11:16] >= '09:20']
-        return result
+        return result if len(result) >= 1 else None
     except Exception as e:
         print(f"❌ Candle fetch error: {e}")
         return None
@@ -291,12 +292,12 @@ def main():
             print(f"✅ {len(all_levels)} levels loaded!")
 
         candles = get_candles()
-        if not candles or len(candles) < 2:
+        if not candles or len(candles) < 1:
             print(f"[{now.strftime('%H:%M')}] No candle data!")
             time.sleep(60)
             continue
 
-        last_closed = candles[-2]
+        last_closed = candles[-2] if len(candles) >= 2 else candles[-1]
         prev_closed = candles[-3] if len(candles) >= 3 else None
         nifty_close = last_closed['close']
 
