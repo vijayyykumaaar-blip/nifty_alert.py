@@ -76,13 +76,15 @@ def get_historical_levels():
 
 def get_candles():
     try:
-        url = "https://api.upstox.com/v2/historical-candle/intraday/NSE_INDEX|Nifty%2050/5minute"
+        # V3 API use kar rahe hain — 5 minute candle support karta hai
+        url = "https://api.upstox.com/v3/historical-candle/intraday/NSE_INDEX|Nifty%2050/minutes/5"
         response = requests.get(url, headers=get_headers(), timeout=10)
         data = response.json()
         if data.get('status') != 'success':
+            print(f"Candle API error: {data}")
             return None
         candles = data['data']['candles']
-        if len(candles) < 1:
+        if not candles or len(candles) < 1:
             return None
         result = []
         for c in candles:
@@ -93,7 +95,9 @@ def get_candles():
                 'low': float(c[3]),
                 'close': float(c[4])
             })
-        # 9:15-9:20 pehla candle ignore
+        # Candles latest pehle hain — reverse karo taaki oldest pehle ho
+        result = result[::-1]
+        # 9:15 pehla candle ignore karo
         result = [c for c in result if c['time'][11:16] >= '09:20']
         return result if len(result) >= 1 else None
     except Exception as e:
