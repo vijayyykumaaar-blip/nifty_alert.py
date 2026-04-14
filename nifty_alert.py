@@ -1,33 +1,40 @@
 import requests
 import time
 import os
+import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime, time as dtime, timedelta
 import pytz
+
+# Stdout flush karo — Railway logs ke liye
+sys.stdout.flush()
 
 TELEGRAM_TOKEN = "8754909402:AAGiudQUtZQeG_LjzF4LcFJ5ca9ScUD7ZN0"
 CHAT_ID = "948684099"
 UPSTOX_TOKEN = os.environ.get("UPSTOX_TOKEN")
 
 IST = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN  = dtime(8, 45)
+MARKET_OPEN   = dtime(8, 45)
 OBSERVE_START = dtime(9, 20)
-TRADE_START  = dtime(9, 40)
-MARKET_CLOSE = dtime(15, 30)
-EOD_EXIT     = dtime(15, 0)
-TOLERANCE    = 0.002
+TRADE_START   = dtime(9, 40)
+MARKET_CLOSE  = dtime(15, 30)
+EOD_EXIT      = dtime(15, 0)
+TOLERANCE     = 0.002
 HIST_TOLERANCE = 0.002
 
 # MC+IB+ST ALGO SETTINGS
-LOT_SIZE   = 65
-ST_PERIOD  = 10
-ST_MULT    = 3
-RR_RATIO   = 2
-SL_BUFFER  = 0.001
-TRAIL_PTS  = 10
-DELTA_MIN  = 0.20
-DELTA_MAX  = 0.25
+LOT_SIZE  = 65
+ST_PERIOD = 10
+ST_MULT   = 3
+RR_RATIO  = 2
+SL_BUFFER = 0.001
+TRAIL_PTS = 10
+DELTA_MIN = 0.20
+DELTA_MAX = 0.25
+
+def log(msg):
+    print(msg, flush=True)
 
 # =============================================
 # TELEGRAM
@@ -37,9 +44,9 @@ def send_alert(message):
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload, timeout=10)
-        print(f"✅ Alert sent!")
+        log(f"✅ Alert sent!")
     except Exception as e:
-        print(f"❌ Alert error: {e}")
+        log(f"❌ Alert error: {e}")
 
 # =============================================
 # MARKET HOURS
@@ -86,7 +93,7 @@ def get_historical_levels():
                            round(float(c[3]),2), round(float(c[4]),2)])
         return sorted(set(levels))
     except Exception as e:
-        print(f"❌ Historical levels error: {e}")
+        log(f"❌ Historical levels error: {e}")
         return []
 
 # =============================================
@@ -115,7 +122,7 @@ def get_candles():
         result = [c for c in result if c['time'][11:16] >= '09:15']
         return result if len(result) >= 3 else None
     except Exception as e:
-        print(f"❌ Candle fetch error: {e}")
+        log(f"❌ Candle fetch error: {e}")
         return None
 
 # =============================================
@@ -196,7 +203,7 @@ def calculate_supertrend(candles, period=10, multiplier=3):
     return df
 
 # =============================================
-# OPTION CHAIN - PUT/CALL STRIKE
+# OPTION CHAIN
 # =============================================
 def get_weekly_expiry():
     today      = datetime.now(IST)
@@ -217,30 +224,23 @@ def get_option_strike(option_type="PUT"):
         best_strike = best_delta = best_premium = best_instrument = None
 
         for option in data['data']:
-            if option_type == "PUT":
-                opt_data = option.get('put_options', {})
-            else:
-                opt_data = option.get('call_options', {})
-
+            opt_data = option.get('put_options' if option_type == "PUT" else 'call_options', {})
             if not opt_data:
                 continue
-
-            greeks    = opt_data.get('option_greeks', {})
-            delta     = greeks.get('delta', 0)
-            premium   = opt_data.get('market_data', {}).get('ltp', 0)
-            strike    = option.get('strike_price', 0)
+            greeks     = opt_data.get('option_greeks', {})
+            delta      = greeks.get('delta', 0)
+            premium    = opt_data.get('market_data', {}).get('ltp', 0)
+            strike     = option.get('strike_price', 0)
             instrument = opt_data.get('instrument_key', '')
-
             if DELTA_MIN <= abs(delta) <= DELTA_MAX:
                 if best_delta is None or abs(abs(delta) - 0.225) < abs(abs(best_delta) - 0.225):
                     best_strike     = strike
                     best_delta      = delta
                     best_premium    = premium
                     best_instrument = instrument
-
         return best_strike, best_delta, best_premium, best_instrument
     except Exception as e:
-        print(f"❌ Option chain error: {e}")
+        log(f"❌ Option chain error: {e}")
         return None, None, None, None
 
 # =============================================
@@ -270,7 +270,7 @@ def place_order(instrument_key, transaction_type="BUY"):
             send_alert(f"❌ <b>Order fail!</b>\n{data}")
             return None
     except Exception as e:
-        print(f"❌ Order error: {e}")
+        log(f"❌ Order error: {e}")
         return None
 
 def get_current_premium(instrument_key):
@@ -292,249 +292,224 @@ def near_historical(price, levels, tolerance=HIST_TOLERANCE):
     return False, None
 
 # =============================================
-# MAIN
+# MAIN - INFINITE LOOP
 # =============================================
 def main():
-    print("🚀 Nifty 50 — ALERT + MC/IB/ST ALGO Started!")
+    log("🚀 Nifty 50 — ALERT + MC/IB/ST ALGO Started!")
+    log("♾️  Infinite loop running...")
+    send_alert("🚀 <b>Nifty Alert System Started!</b>\nMarket open hone ka wait kar raha hoon...")
 
     # Alert variables
-    day_high        = 0
-    day_low         = float('inf')
-    came_down       = False
-    all_levels      = []
-    levels_alerted  = False
-    alerted_levels  = set()
+    day_high         = 0
+    day_low          = float('inf')
+    came_down        = False
+    all_levels       = []
+    levels_alerted   = False
+    alerted_levels   = set()
     alerted_day_high = False
     alerted_day_low  = False
     last_reset_date  = None
 
     # Algo variables
-    in_trade        = False
-    traded_today    = None
-    algo_direction  = None   # "CALL" or "PUT"
-    entry_price     = None
-    entry_premium   = None
-    hard_sl         = None
-    target_price    = None
-    instrument_key  = None
-    strike          = None
-    entry_delta     = None
-    trail_active    = False
-    trail_sl        = None
-    best_nifty      = None
-    mc_candle       = None   # Mother candle
-    ic_candle       = None   # Inside candle
-    waiting_breakout = False # Breakout ka wait
+    in_trade         = False
+    traded_today     = None
+    algo_direction   = None
+    entry_price      = None
+    entry_premium    = None
+    hard_sl          = None
+    target_price     = None
+    instrument_key   = None
+    strike           = None
+    entry_delta      = None
+    trail_active     = False
+    trail_sl         = None
+    best_nifty       = None
 
     while True:
-        now   = datetime.now(IST)
-        today = now.date()
+        try:
+            now   = datetime.now(IST)
+            today = now.date()
 
-        # =============================================
-        # DAILY RESET
-        # =============================================
-        if last_reset_date != today:
-            day_high = 0
-            day_low  = float('inf')
-            came_down = False
-            all_levels = []
-            levels_alerted  = False
-            alerted_levels  = set()
-            alerted_day_high = False
-            alerted_day_low  = False
-            last_reset_date  = today
-            in_trade         = False
-            traded_today     = None
-            algo_direction   = None
-            entry_price      = None
-            entry_premium    = None
-            hard_sl          = None
-            target_price     = None
-            instrument_key   = None
-            strike           = None
-            entry_delta      = None
-            trail_active     = False
-            trail_sl         = None
-            best_nifty       = None
-            mc_candle        = None
-            ic_candle        = None
-            waiting_breakout = False
-            print(f"🔄 Daily reset!")
+            # =============================================
+            # DAILY RESET
+            # =============================================
+            if last_reset_date != today:
+                day_high         = 0
+                day_low          = float('inf')
+                came_down        = False
+                all_levels       = []
+                levels_alerted   = False
+                alerted_levels   = set()
+                alerted_day_high = False
+                alerted_day_low  = False
+                last_reset_date  = today
+                in_trade         = False
+                traded_today     = None
+                algo_direction   = None
+                entry_price      = None
+                entry_premium    = None
+                hard_sl          = None
+                target_price     = None
+                instrument_key   = None
+                strike           = None
+                entry_delta      = None
+                trail_active     = False
+                trail_sl         = None
+                best_nifty       = None
+                log(f"🔄 Daily reset! Date: {today}")
 
-        # =============================================
-        # SLEEP LOGIC
-        # =============================================
-        if not is_market_open():
-            print(f"[{now.strftime('%H:%M')}] Market closed. Sleep 30 min...")
-            time.sleep(1800)  # 30 min sleep
-            continue
-
-        # Market open — 10 sec polling
-        sleep_time = 10
-
-        # =============================================
-        # HISTORICAL LEVELS LOAD
-        # =============================================
-        if len(all_levels) == 0:
-            all_levels = get_historical_levels()
-            if len(all_levels) == 0:
-                time.sleep(60)
+            # =============================================
+            # SLEEP LOGIC
+            # =============================================
+            if not is_market_open():
+                log(f"[{now.strftime('%H:%M')}] Market closed. Sleep 30 min...")
+                time.sleep(1800)
                 continue
 
-            if not levels_alerted:
-                top_str    = "\n".join([f"  🔴 {l}" for l in reversed(all_levels[-10:])])
-                bottom_str = "\n".join([f"  🟢 {l}" for l in reversed(all_levels[:10])])
-                send_alert(
-                    f"📊 <b>20 Din Ke Key Levels</b>\n\n"
-                    f"🔴 <b>Resistance:</b>\n{top_str}\n\n"
-                    f"🟢 <b>Support:</b>\n{bottom_str}\n\n"
-                    f"📅 {today} | 🕐 {now.strftime('%H:%M')} IST"
-                )
-                levels_alerted = True
+            # Market open — 10 sec polling
+            sleep_time = 10
 
-        # =============================================
-        # CANDLES FETCH
-        # =============================================
-        candles = get_candles()
-        if not candles or len(candles) < 3:
-            time.sleep(sleep_time)
-            continue
-
-        last_closed = candles[-2]
-        prev_closed = candles[-3]
-        nifty_close = last_closed['close']
-
-        # =============================================
-        # DAY HIGH/LOW TRACK
-        # =============================================
-        if can_observe():
-            for c in candles:
-                if c['high'] > day_high:
-                    day_high = c['high']
-                    came_down = False
-                    alerted_day_high = False
-                if c['low'] < day_low:
-                    day_low = c['low']
-                    alerted_day_low = False
-
-            if day_high > 0 and nifty_close < day_high * 0.998:
-                came_down = True
-
-        # =============================================
-        # ALERT SYSTEM
-        # =============================================
-        if can_trade():
-
-            # Day High - Resistance Alert
-            if day_high > 0:
-                near_high  = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
-                below_high = nifty_close < day_high
-
-                if near_high and below_high and came_down and not alerted_day_high:
-                    hist_match, hist_level = near_historical(day_high, all_levels)
-                    setup_type = "🔥 STRONG" if hist_match else "⚡ Normal"
-                    extra      = f"\n📊 Historical Match: {hist_level}" if hist_match else ""
-                    prev_green = "\n✅ Pichli GREEN!" if prev_closed['close'] > prev_closed['open'] else "\n⚠️ Pichli GREEN nahi!"
-                    curr_red   = "\n🔴 Current RED!" if last_closed['close'] < last_closed['open'] else "\n⚠️ Current RED nahi!"
-
-                    send_alert(
-                        f"🚨 <b>RESISTANCE ALERT! {setup_type}</b>\n\n"
-                        f"📍 Day High: {day_high}\n"
-                        f"💹 Price: {nifty_close}"
-                        f"{extra}{prev_green}{curr_red}\n\n"
-                        f"🕐 {now.strftime('%H:%M')} IST"
-                    )
-                    alerted_day_high = True
-
-            # Day Low - Support Alert
-            if day_low < float('inf'):
-                near_low  = abs(nifty_close - day_low) / nifty_close <= TOLERANCE
-                above_low = nifty_close > day_low
-
-                if near_low and above_low and not alerted_day_low:
-                    hist_match, hist_level = near_historical(day_low, all_levels)
-                    setup_type = "🔥 STRONG" if hist_match else "⚡ Normal"
-                    extra      = f"\n📊 Historical Match: {hist_level}" if hist_match else ""
-                    prev_green = "\n✅ Pichli GREEN!" if prev_closed['close'] > prev_closed['open'] else "\n⚠️ Pichli GREEN nahi!"
-                    curr_red   = "\n🔴 Current RED!" if last_closed['close'] < last_closed['open'] else "\n⚪ Current GREEN!"
-
-                    send_alert(
-                        f"🟢 <b>SUPPORT ALERT! {setup_type}</b>\n\n"
-                        f"📍 Day Low: {day_low}\n"
-                        f"💹 Price: {nifty_close}"
-                        f"{extra}{prev_green}{curr_red}\n\n"
-                        f"🕐 {now.strftime('%H:%M')} IST"
-                    )
-                    alerted_day_low = True
-
-            # Historical Levels Alert
-            for level in all_levels:
-                if level in alerted_levels:
+            # =============================================
+            # HISTORICAL LEVELS
+            # =============================================
+            if len(all_levels) == 0:
+                log("📈 20 din ke historical levels load ho rahe hain...")
+                all_levels = get_historical_levels()
+                if len(all_levels) == 0:
+                    time.sleep(60)
                     continue
-                if abs(nifty_close - level) / nifty_close <= TOLERANCE:
-                    direction  = "🔴 RESISTANCE" if level > nifty_close else "🟢 SUPPORT"
-                    emoji      = "🔴" if level > nifty_close else "🟢"
-                    day_match  = ""
-                    if day_high > 0 and abs(level - day_high) / day_high <= TOLERANCE:
-                        day_match = "\n🔥 Day High match! STRONG!"
-                    elif day_low < float('inf') and abs(level - day_low) / day_low <= TOLERANCE:
-                        day_match = "\n🔥 Day Low match! STRONG!"
+                log(f"✅ {len(all_levels)} levels loaded!")
 
+                if not levels_alerted:
+                    top_str    = "\n".join([f"  🔴 {l}" for l in reversed(all_levels[-10:])])
+                    bottom_str = "\n".join([f"  🟢 {l}" for l in reversed(all_levels[:10])])
                     send_alert(
-                        f"{emoji} <b>HISTORICAL LEVEL!</b>\n\n"
-                        f"📍 Level: {level} ({direction})\n"
-                        f"💹 Price: {nifty_close}"
-                        f"{day_match}\n\n"
-                        f"🕐 {now.strftime('%H:%M')} IST"
+                        f"📊 <b>20 Din Ke Key Levels</b>\n\n"
+                        f"🔴 <b>Resistance:</b>\n{top_str}\n\n"
+                        f"🟢 <b>Support:</b>\n{bottom_str}\n\n"
+                        f"📅 {today} | 🕐 {now.strftime('%H:%M')} IST"
                     )
-                    alerted_levels.add(level)
+                    levels_alerted = True
 
-        # =============================================
-        # MC + IB + ST ALGO
-        # =============================================
+            # =============================================
+            # CANDLES FETCH
+            # =============================================
+            candles = get_candles()
+            if not candles or len(candles) < 3:
+                log(f"[{now.strftime('%H:%M')}] No candle data!")
+                time.sleep(sleep_time)
+                continue
 
-        # EOD EXIT
-        if in_trade and is_eod():
-            nifty_ltp  = get_nifty_ltp()
-            curr_prem  = get_current_premium(instrument_key) or entry_premium
-            pnl        = round((entry_premium - curr_prem) * LOT_SIZE, 2) if algo_direction == "PUT" else round((curr_prem - entry_premium) * LOT_SIZE, 2)
-            place_order(instrument_key, "SELL")
-            send_alert(
-                f"⏰ <b>EOD EXIT!</b>\n\n"
-                f"📊 {strike} {algo_direction}\n"
-                f"💰 Entry: ₹{entry_premium} | Exit: ₹{curr_prem}\n"
-                f"📈 P&L: ₹{pnl}\n"
-                f"🕐 {now.strftime('%H:%M')} IST"
-            )
-            in_trade       = False
-            trail_active   = False
-            trail_sl       = None
-            mc_candle      = None
-            ic_candle      = None
-            waiting_breakout = False
-            time.sleep(sleep_time)
-            continue
+            last_closed = candles[-2]
+            prev_closed = candles[-3]
+            nifty_close = last_closed['close']
 
-        # TRADE MONITOR - Real time trailing
-        if in_trade and instrument_key:
-            nifty_ltp = get_nifty_ltp()
-            if nifty_ltp:
-                print(f"[{now.strftime('%H:%M:%S')}] IN TRADE | LTP: {nifty_ltp} | SL: {hard_sl} | Trail: {trail_sl} | Target: {target_price}")
+            # =============================================
+            # DAY HIGH/LOW TRACK
+            # =============================================
+            if can_observe():
+                for c in candles:
+                    if c['high'] > day_high:
+                        day_high = c['high']
+                        came_down = False
+                        alerted_day_high = False
+                    if c['low'] < day_low:
+                        day_low = c['low']
+                        alerted_day_low = False
 
-                if algo_direction == "CALL":
-                    # Best price update
-                    if nifty_ltp > best_nifty:
-                        best_nifty = nifty_ltp
-                        if trail_active:
-                            trail_sl = round(best_nifty - TRAIL_PTS, 2)
+                if day_high > 0 and nifty_close < day_high * 0.998:
+                    came_down = True
 
-                    # Trail activate
-                    if not trail_active and nifty_ltp > entry_price:
-                        trail_active = True
-                        trail_sl     = round(nifty_ltp - TRAIL_PTS, 2)
-                        send_alert(f"🎯 <b>TRAIL ON!</b> Trail SL: {trail_sl}")
+            # =============================================
+            # ALERT SYSTEM
+            # =============================================
+            if can_trade():
 
-                    # Hard SL hit
-                    if nifty_ltp <= hard_sl:
-                        curr_prem = get_current_premium(instrument_key) or entry_premium
-                      
+                # Day High - Resistance Alert
+                if day_high > 0:
+                    near_high  = abs(nifty_close - day_high) / nifty_close <= TOLERANCE
+                    below_high = nifty_close < day_high
+                    if near_high and below_high and came_down and not alerted_day_high:
+                        hist_match, hist_level = near_historical(day_high, all_levels)
+                        setup_type = "🔥 STRONG" if hist_match else "⚡ Normal"
+                        extra      = f"\n📊 Historical Match: {hist_level}" if hist_match else ""
+                        prev_green = "\n✅ Pichli GREEN!" if prev_closed['close'] > prev_closed['open'] else "\n⚠️ Pichli GREEN nahi!"
+                        curr_red   = "\n🔴 Current RED!" if last_closed['close'] < last_closed['open'] else "\n⚠️ Current RED nahi!"
+                        send_alert(
+                            f"🚨 <b>RESISTANCE ALERT! {setup_type}</b>\n\n"
+                            f"📍 Day High: {day_high}\n"
+                            f"💹 Price: {nifty_close}"
+                            f"{extra}{prev_green}{curr_red}\n\n"
+                            f"🕐 {now.strftime('%H:%M')} IST"
+                        )
+                        alerted_day_high = True
+
+                # Day Low - Support Alert
+                if day_low < float('inf'):
+                    near_low  = abs(nifty_close - day_low) / nifty_close <= TOLERANCE
+                    above_low = nifty_close > day_low
+                    if near_low and above_low and not alerted_day_low:
+                        hist_match, hist_level = near_historical(day_low, all_levels)
+                        setup_type = "🔥 STRONG" if hist_match else "⚡ Normal"
+                        extra      = f"\n📊 Historical Match: {hist_level}" if hist_match else ""
+                        prev_green = "\n✅ Pichli GREEN!" if prev_closed['close'] > prev_closed['open'] else "\n⚠️ Pichli GREEN nahi!"
+                        curr_red   = "\n🔴 Current RED!" if last_closed['close'] < last_closed['open'] else "\n⚪ Current GREEN!"
+                        send_alert(
+                            f"🟢 <b>SUPPORT ALERT! {setup_type}</b>\n\n"
+                            f"📍 Day Low: {day_low}\n"
+                            f"💹 Price: {nifty_close}"
+                            f"{extra}{prev_green}{curr_red}\n\n"
+                            f"🕐 {now.strftime('%H:%M')} IST"
+                        )
+                        alerted_day_low = True
+
+                # Historical Levels Alert
+                for level in all_levels:
+                    if level in alerted_levels:
+                        continue
+                    if abs(nifty_close - level) / nifty_close <= TOLERANCE:
+                        direction = "🔴 RESISTANCE" if level > nifty_close else "🟢 SUPPORT"
+                        emoji     = "🔴" if level > nifty_close else "🟢"
+                        day_match = ""
+                        if day_high > 0 and abs(level - day_high) / day_high <= TOLERANCE:
+                            day_match = "\n🔥 Day High match! STRONG!"
+                        elif day_low < float('inf') and abs(level - day_low) / day_low <= TOLERANCE:
+                            day_match = "\n🔥 Day Low match! STRONG!"
+                        send_alert(
+                            f"{emoji} <b>HISTORICAL LEVEL!</b>\n\n"
+                            f"📍 Level: {level} ({direction})\n"
+                            f"💹 Price: {nifty_close}"
+                            f"{day_match}\n\n"
+                            f"🕐 {now.strftime('%H:%M')} IST"
+                        )
+                        alerted_levels.add(level)
+
+            # =============================================
+            # MC + IB + ST ALGO - EOD EXIT
+            # =============================================
+            if in_trade and is_eod():
+                curr_prem = get_current_premium(instrument_key) or entry_premium
+                pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2) if algo_direction == "PUT" else round((curr_prem - entry_premium) * LOT_SIZE, 2)
+                place_order(instrument_key, "SELL")
+                send_alert(
+                    f"⏰ <b>EOD EXIT!</b>\n\n"
+                    f"📊 {strike} {algo_direction}\n"
+                    f"💰 Entry: ₹{entry_premium} | Exit: ₹{curr_prem}\n"
+                    f"📈 P&L: ₹{pnl}\n"
+                    f"🕐 {now.strftime('%H:%M')} IST"
+                )
+                in_trade     = False
+                trail_active = False
+                trail_sl     = None
+
+            # =============================================
+            # TRADE MONITOR - Real time trailing
+            # =============================================
+            elif in_trade and instrument_key:
+                nifty_ltp = get_nifty_ltp()
+                if nifty_ltp:
+                    log(f"[{now.strftime('%H:%M:%S')}] IN TRADE | LTP: {nifty_ltp} | SL: {hard_sl} | Trail: {trail_sl} | Target: {target_price}")
+
+                    if algo_direction == "CALL":
+                        if nifty_ltp > best_nifty:
+  
