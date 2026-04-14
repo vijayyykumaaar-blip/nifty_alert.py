@@ -21,11 +21,14 @@ EOD_EXIT     = dtime(15, 0)
 PROFIT_TIME  = dtime(14, 15)  # 2:15 PM profit booking
 NO_TRADE     = dtime(14, 30)  # 2:30 PM ke baad no new trade
 
-LOT_SIZE       = 130  # 2 lots fixed
+LOT_SIZE       = 130   # 2 lots fixed
 TRAIL_PTS      = 10
-TARGET_PREMIUM_MIN = 95   # Min premium
-TARGET_PREMIUM_MAX = 105  # Max premium
-NEAR_PTS       = 40   # 40 points near day high/low for profit booking
+BUDGET         = 14000 # Max budget
+CALL_DELTA_MIN = 0.18  # CALL delta positive
+CALL_DELTA_MAX = 0.30
+PUT_DELTA_MIN  = -0.30 # PUT delta negative
+PUT_DELTA_MAX  = -0.18
+NEAR_PTS       = 40    # 40 points near day high/low
 
 def log(msg):
     print(msg, flush=True)
@@ -114,31 +117,50 @@ def get_option_strike(option_type="PUT"):
         if data.get('status') != 'success':
             return None, None, None, None
 
-        best_strike = best_premium = best_instrument = None
-        best_diff   = float('inf')
+        best_strike = best_delta = best_premium = best_instrument = None
+        max_premium = BUDGET / LOT_SIZE  # 14000 / 130 = ~107
 
         for option in data['data']:
+            # Upstox API: call_options = positive delta, put_options = negative delta
             opt_data   = option.get('put_options' if option_type == "PUT" else 'call_options', {})
             if not opt_data:
                 continue
+
+            greeks     = opt_data.get('option_greeks', {})
+            delta      = greeks.get('delta', 0)
             premium    = opt_data.get('market_data', {}).get('ltp', 0)
             strike     = option.get('strike_price', 0)
             instrument = opt_data.get('instrument_key', '')
 
-            # Premium 95-105 ke beech hona chahiye
-            if TARGET_PREMIUM_MIN <= premium <= TARGET_PREMIUM_MAX:
-                diff = abs(premium - 100)
-                if diff < best_diff:
-                    best_diff       = diff
-                    best_strike     = strike
-                    best_premium    = premium
-                    best_instrument = instrument
+            # Budget check - 2 lot affordable hona chahiye
+            if premium * LOT_SIZE > BUDGET:
+                continue
+
+            if option_type == "CALL":
+                # CALL: delta positive 0.18 to 0.30
+                if CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX:
+                    if best_delta is None or abs(delta - 0.24) < abs(best_delta - 0.24):
+                        best_strike     = strike
+                        best_delta      = delta
+                        best_premium    = premium
+                        best_instrument = instrument
+            else:
+                # PUT: delta negative -0.30 to -0.18
+                if PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX:
+                    if best_delta is None or abs(delta - (-0.24)) < abs(best_delta - (-0.24)):
+                        best_strike     = strike
+                        best_delta      = delta
+                        best_premium    = premium
+                        best_instrument = instrument
 
         if best_strike is None:
-            log(f"⚠️ Premium 95-105 range mein koi strike nahi mila! Trade skip.")
+            log(f"⚠️ {option_type} strike nahi mila! Delta range ya budget check karo. Trade skip.")
+            send_alert(f"⚠️ <b>{option_type} Strike nahi mila!</b>\nDelta 0.18-0.30 range ya budget ₹{BUDGET} check karo!")
             return None, None, None, None
 
-        return best_strike, None, best_premium, best_instrument
+        log(f"✅ {option_type} Strike: {best_strike} | Delta: {best_delta} | Premium: ₹{best_premium} | Cost: ₹{best_premium * LOT_SIZE}")
+        return best_strike, best_delta, best_premium, best_instrument
+
     except Exception as e:
         log(f"❌ Option chain error: {e}")
         return None, None, None, None
