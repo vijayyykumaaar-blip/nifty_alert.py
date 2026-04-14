@@ -266,10 +266,10 @@ def main():
                 last_reset     = today
                 log(f"🔄 Daily reset! {today}")
 
-            # Market closed - 30 min sleep
+            # Market closed - 15 min sleep
             if not is_market_open():
-                log(f"[{now.strftime('%H:%M')}] Market closed. Sleep 30 min...")
-                time.sleep(1800)
+                log(f"[{now.strftime('%H:%M')}] Market closed. Sleep 15 min...")
+                time.sleep(900)
                 continue
 
             sleep_time = 10
@@ -277,8 +277,8 @@ def main():
             # Candles fetch
             candles = get_candles()
             if not candles or len(candles) < 4:
-                log(f"[{now.strftime('%H:%M')}] No candle data!")
-                time.sleep(sleep_time)
+                log(f"[{now.strftime('%H:%M')}] No candle data! Market abhi open nahi hua - Sleep 15 min...")
+                time.sleep(900)  # 15 min sleep - market open hone ka wait
                 continue
 
             # Last closed candle - SL check ke liye
