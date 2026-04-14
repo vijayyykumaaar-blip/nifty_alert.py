@@ -23,7 +23,7 @@ LOT_SIZE  = 65
 ST_PERIOD = 10
 ST_MULT   = 3
 RR_RATIO  = 2
-SL_BUFFER = 5
+SL_BUFFER = 5      # 5 points buffer
 TRAIL_PTS = 10
 DELTA_MIN = 0.20
 DELTA_MAX = 0.25
@@ -245,9 +245,8 @@ def main():
 
     while True:
         try:
-            now        = datetime.now(IST)
-            today      = now.date()
-            sleep_time = 10  # DEFAULT sleep time - har loop mein reset
+            now   = datetime.now(IST)
+            today = now.date()
 
             # Daily reset
             if last_reset != today:
@@ -273,6 +272,8 @@ def main():
                 time.sleep(1800)
                 continue
 
+            sleep_time = 10
+
             # Candles fetch
             candles = get_candles()
             if not candles or len(candles) < 4:
@@ -280,7 +281,8 @@ def main():
                 time.sleep(sleep_time)
                 continue
 
-            last_closed  = candles[-2]
+            # Last closed candle - SL check ke liye
+            last_closed = candles[-2]
             candle_close = last_closed['close']
 
             # EOD EXIT
@@ -305,25 +307,28 @@ def main():
             if in_trade and instrument_key:
                 nifty_ltp = get_nifty_ltp()
                 if nifty_ltp:
-                    log(f"[{now.strftime('%H:%M:%S')}] LTP:{nifty_ltp} | Close:{candle_close} | SL:{hard_sl} | Trail:{trail_sl} | Target:{target_price}")
+                    log(f"[{now.strftime('%H:%M:%S')}] LTP:{nifty_ltp} | Candle Close:{candle_close} | SL:{hard_sl} | Trail:{trail_sl} | Target:{target_price}")
 
                     if algo_direction == "CALL":
+                        # Best price update - real time
                         if nifty_ltp > best_nifty:
                             best_nifty = nifty_ltp
                             if trail_active:
                                 trail_sl = round(best_nifty - TRAIL_PTS, 2)
 
+                        # Trail activate - real time
                         if not trail_active and nifty_ltp > entry_price:
                             trail_active = True
                             trail_sl     = round(nifty_ltp - TRAIL_PTS, 2)
                             send_alert(f"🎯 <b>TRAIL ON!</b>\nTrail SL: {trail_sl}\n🕐 {now.strftime('%H:%M')} IST")
 
+                        # SL check - CANDLE CLOSE pe
                         if candle_close <= hard_sl:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
                             pnl = round((curr_prem - entry_premium) * LOT_SIZE, 2)
                             send_alert(
-                                f"🛑 <b>SL HIT!</b>\n\n"
+                                f"🛑 <b>SL HIT! (Candle Close)</b>\n\n"
                                 f"📊 {strike} CALL\n"
                                 f"💹 Candle Close: {candle_close}\n"
                                 f"🛑 SL: {hard_sl}\n"
@@ -332,6 +337,7 @@ def main():
                             )
                             in_trade = False; trail_active = False; trail_sl = None
 
+                        # Trail SL - real time LTP pe
                         elif trail_active and trail_sl and nifty_ltp <= trail_sl:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
@@ -346,6 +352,7 @@ def main():
                             )
                             in_trade = False; trail_active = False; trail_sl = None
 
+                        # Target - real time LTP pe
                         elif nifty_ltp >= target_price:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
@@ -361,22 +368,25 @@ def main():
                             in_trade = False; trail_active = False; trail_sl = None
 
                     else:  # PUT
+                        # Best price update - real time
                         if nifty_ltp < best_nifty:
                             best_nifty = nifty_ltp
                             if trail_active:
                                 trail_sl = round(best_nifty + TRAIL_PTS, 2)
 
+                        # Trail activate - real time
                         if not trail_active and nifty_ltp < entry_price:
                             trail_active = True
                             trail_sl     = round(nifty_ltp + TRAIL_PTS, 2)
                             send_alert(f"🎯 <b>TRAIL ON!</b>\nTrail SL: {trail_sl}\n🕐 {now.strftime('%H:%M')} IST")
 
+                        # SL check - CANDLE CLOSE pe
                         if candle_close >= hard_sl:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
                             pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
                             send_alert(
-                                f"🛑 <b>SL HIT!</b>\n\n"
+                                f"🛑 <b>SL HIT! (Candle Close)</b>\n\n"
                                 f"📊 {strike} PUT\n"
                                 f"💹 Candle Close: {candle_close}\n"
                                 f"🛑 SL: {hard_sl}\n"
@@ -385,6 +395,7 @@ def main():
                             )
                             in_trade = False; trail_active = False; trail_sl = None
 
+                        # Trail SL - real time LTP pe
                         elif trail_active and trail_sl and nifty_ltp >= trail_sl:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
@@ -399,6 +410,7 @@ def main():
                             )
                             in_trade = False; trail_active = False; trail_sl = None
 
+                        # Target - real time LTP pe
                         elif nifty_ltp <= target_price:
                             curr_prem = get_current_premium(instrument_key) or entry_premium
                             place_order(instrument_key, "SELL")
@@ -439,10 +451,12 @@ def main():
                             entry_nifty = ec['Open']
 
                             if direction == "CALL":
+                                # SL = MC Low - 5 points
                                 sl_calc = round(mc_low - SL_BUFFER, 2)
                                 risk    = entry_nifty - sl_calc
                                 tgt     = round(entry_nifty + risk * RR_RATIO, 2)
                             else:
+                                # SL = MC High + 5 points
                                 sl_calc = round(mc_high + SL_BUFFER, 2)
                                 risk    = sl_calc - entry_nifty
                                 tgt     = round(entry_nifty - risk * RR_RATIO, 2)
@@ -471,6 +485,22 @@ def main():
                                             f"📊 Strike: {strike} {direction}\n"
                                             f"💰 Premium: ₹{entry_premium}\n"
                                             f"📍 MC High: {mc_high} | MC Low: {mc_low}\n"
-                                            f"🛑 SL: {hard_sl}\n"
+                                            f"🛑 SL: {hard_sl} (Candle close pe check)\n"
                                             f"🎯 Target: {target_price}\n"
-                                 
+                                            f"🔄 Trail: {TRAIL_PTS} pts (Real time)\n"
+                                            f"📉 Delta: {entry_delta}\n"
+                                            f"📦 Qty: {LOT_SIZE}\n"
+                                            f"🕐 {now.strftime('%H:%M')} IST"
+                                        )
+
+            log(f"[{now.strftime('%H:%M:%S')}] Trade:{in_trade} | Direction:{algo_direction} | Trail:{trail_active}")
+
+        except Exception as e:
+            log(f"❌ Error: {e}")
+            time.sleep(10)
+            continue
+
+        time.sleep(sleep_time)
+
+if __name__ == "__main__":
+    main()
