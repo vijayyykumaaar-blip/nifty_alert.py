@@ -168,9 +168,9 @@ def get_option_strike(option_type="PUT"):
                 continue
 
             if option_type == "CALL":
-                # CALL: Spot ke upar ka strike - OTM
-                if strike > spot:
-                    diff = strike - spot  # Spot se kitna upar
+                # CALL: Spot + 50 se upar = OTM only
+                if strike >= spot + 100:
+                    diff = strike - spot
                     if diff < best_diff:
                         best_diff       = diff
                         best_strike     = strike
@@ -178,9 +178,9 @@ def get_option_strike(option_type="PUT"):
                         best_premium    = premium
                         best_instrument = instrument
             else:
-                # PUT: Spot ke neeche ka strike - OTM
-                if strike < spot:
-                    diff = spot - strike  # Spot se kitna neeche
+                # PUT: Spot - 50 se neeche = OTM only
+                if strike <= spot - 100:
+                    diff = spot - strike
                     if diff < best_diff:
                         best_diff       = diff
                         best_strike     = strike
