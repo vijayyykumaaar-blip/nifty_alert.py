@@ -125,7 +125,11 @@ def get_weekly_expiry():
     days_ahead = 3 - today.weekday()
     if days_ahead < 0:
         days_ahead += 7
-    return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    expiry = today + timedelta(days=days_ahead)
+    # Agar aaj expiry hai to agle week ki expiry lo
+    if expiry.date() == today.date():
+        expiry = expiry + timedelta(days=7)
+    return expiry.strftime("%Y-%m-%d")
 
 # =============================================
 # OPTION STRIKE
@@ -165,19 +169,30 @@ def get_option_strike(option_type="PUT"):
             if not instrument or premium <= 0:
                 continue
 
-            # CALL: delta positive 0.18-0.30
-            # PUT: delta negative -0.30 to -0.18
+            # Spot se distance check
             if option_type == "CALL":
-                in_range = CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX
+                # CALL: Spot se 200-800 upar
+                strike_ok = (spot + 200) <= strike <= (spot + 800)
+                delta_ok  = CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX
             else:
-                in_range = PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX
+                # PUT: Spot se 200-800 neeche
+                strike_ok = (spot - 800) <= strike <= (spot - 200)
+                delta_ok  = PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX
 
-            log(f"   Strike:{strike} | Delta:{delta:.3f} | Premium:₹{premium} | Range:{in_range}")
+            in_range = delta_ok or strike_ok  # Dono mein se koi bhi
+
+            log(f"   Strike:{strike} | Delta:{delta:.3f} | Premium:₹{premium} | StrikeOK:{strike_ok} | DeltaOK:{delta_ok}")
 
             if in_range:
-                # Sabse 0.24 ke paas wala delta lo
-                target = 0.24 if option_type == "CALL" else -0.24
-                diff = abs(delta - target)
+                # Delta milta hai to delta se select karo
+                # Nahi milta to spot distance se
+                if delta_ok:
+                    target = 0.24 if option_type == "CALL" else -0.24
+                    diff = abs(delta - target)
+                else:
+                    # Spot ke sabse paas wala OTM strike
+                    diff = abs(strike - spot)
+
                 if diff < best_diff:
                     best_diff       = diff
                     best_strike     = strike
