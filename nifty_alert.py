@@ -103,7 +103,7 @@ def get_candles_30min():
         result = result[::-1]
         # 9:15 se filter
         result = [c for c in result if c['time'][11:16] >= '09:15']
-        return result if len(result) >= 2 else None
+        return result if len(result) >= 1 else None
     except Exception as e:
         log(f"❌ Candle error: {e}")
         return None
