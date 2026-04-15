@@ -24,7 +24,7 @@ EOD_EXIT     = dtime(15, 0)   # 3:00 PM mandatory exit
 TRAIL_TIME   = dtime(14, 15)  # 2:15 ke baad trail/profit
 
 # Trade settings
-LOT_SIZE       = 130    # 2 lots
+LOT_SIZE       = 65     # 1 lot
 TRAIL_PTS      = 10     # Trail step
 BUDGET         = 14000  # Max budget
 CALL_DELTA_MIN = 0.10
