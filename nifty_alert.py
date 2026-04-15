@@ -27,10 +27,10 @@ TRAIL_TIME   = dtime(14, 15)  # 2:15 ke baad trail/profit
 LOT_SIZE       = 130    # 2 lots
 TRAIL_PTS      = 10     # Trail step
 BUDGET         = 14000  # Max budget
-CALL_DELTA_MIN = 0.18
-CALL_DELTA_MAX = 0.30
-PUT_DELTA_MIN  = -0.30
-PUT_DELTA_MAX  = -0.18
+CALL_DELTA_MIN = 0.10
+CALL_DELTA_MAX = 0.50
+PUT_DELTA_MIN  = -0.50
+PUT_DELTA_MAX  = -0.10
 NEAR_PTS       = 40     # Profit booking buffer
 
 # =============================================
@@ -132,20 +132,30 @@ def get_weekly_expiry():
 # =============================================
 def get_option_strike(option_type="PUT"):
     try:
+        # Pehle Nifty spot price lo
+        spot = get_nifty_ltp()
+        if not spot:
+            log("❌ Nifty LTP nahi mila!")
+            return None, None, None, None
+
         expiry = get_weekly_expiry()
         url    = f"https://api.upstox.com/v2/option/chain?instrument_key=NSE_INDEX|Nifty%2050&expiry_date={expiry}"
         r      = requests.get(url, headers=get_headers(), timeout=10)
         data   = r.json()
         if data.get('status') != 'success':
+            log(f"❌ Option chain API error: {data}")
             return None, None, None, None
 
         best_strike = best_delta = best_premium = best_instrument = None
-        log(f"🔍 {option_type} chain scan | Budget max premium: ₹{BUDGET/LOT_SIZE:.0f}")
+        best_diff   = float('inf')
+
+        log(f"🔍 {option_type} scan | Spot:{spot:.0f} | Expiry:{expiry}")
 
         for option in data['data']:
-            opt_data   = option.get('put_options' if option_type == "PUT" else 'call_options', {})
+            opt_data = option.get('put_options' if option_type == "PUT" else 'call_options', {})
             if not opt_data:
                 continue
+
             greeks     = opt_data.get('option_greeks', {})
             delta      = greeks.get('delta', 0)
             premium    = opt_data.get('market_data', {}).get('ltp', 0)
@@ -155,30 +165,38 @@ def get_option_strike(option_type="PUT"):
             if not instrument or premium <= 0:
                 continue
 
-            # Debug log
-            log(f"   Strike:{strike} | Delta:{delta:.2f} | Premium:₹{premium} | Cost:₹{premium*LOT_SIZE:.0f}")
-
-            if premium * LOT_SIZE > BUDGET:
-                log(f"   ❌ Budget exceed! ₹{premium*LOT_SIZE:.0f} > ₹{BUDGET}")
-                continue
-
+            # CALL: delta positive 0.18-0.30
+            # PUT: delta negative -0.30 to -0.18
             if option_type == "CALL":
-                if CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX:
-                    if best_delta is None or abs(delta - 0.24) < abs(best_delta - 0.24):
-                        best_strike = strike; best_delta = delta
-                        best_premium = premium; best_instrument = instrument
+                in_range = CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX
             else:
-                if PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX:
-                    if best_delta is None or abs(delta - (-0.24)) < abs(best_delta - (-0.24)):
-                        best_strike = strike; best_delta = delta
-                        best_premium = premium; best_instrument = instrument
+                in_range = PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX
+
+            log(f"   Strike:{strike} | Delta:{delta:.3f} | Premium:₹{premium} | Range:{in_range}")
+
+            if in_range:
+                # Sabse 0.24 ke paas wala delta lo
+                target = 0.24 if option_type == "CALL" else -0.24
+                diff = abs(delta - target)
+                if diff < best_diff:
+                    best_diff       = diff
+                    best_strike     = strike
+                    best_delta      = delta
+                    best_premium    = premium
+                    best_instrument = instrument
 
         if best_strike is None:
-            log(f"⚠️ {option_type} strike nahi mila!")
-            send_alert(f"⚠️ <b>{option_type} Strike nahi mila!</b>")
+            log(f"⚠️ {option_type} delta range mein koi strike nahi mila!")
+            log(f"⚠️ Spot:{spot:.0f} | Range: {'0.18-0.30' if option_type=='CALL' else '-0.30 to -0.18'}")
+            send_alert(
+                f"⚠️ <b>{option_type} Strike nahi mila!</b>\n"
+                f"Spot: {spot:.0f}\n"
+                f"Delta range: {'0.18-0.30' if option_type=='CALL' else '-0.30 to -0.18'}\n"
+                f"Expiry: {expiry}"
+            )
             return None, None, None, None
 
-        log(f"✅ {option_type} | Strike:{best_strike} | Delta:{best_delta:.2f} | Premium:₹{best_premium}")
+        log(f"✅ {option_type} | Strike:{best_strike} | Delta:{best_delta:.3f} | Premium:₹{best_premium}")
         return best_strike, best_delta, best_premium, best_instrument
 
     except Exception as e:
