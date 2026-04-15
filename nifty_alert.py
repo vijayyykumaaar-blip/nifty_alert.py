@@ -140,6 +140,7 @@ def get_option_strike(option_type="PUT"):
             return None, None, None, None
 
         best_strike = best_delta = best_premium = best_instrument = None
+        log(f"🔍 {option_type} chain scan | Budget max premium: ₹{BUDGET/LOT_SIZE:.0f}")
 
         for option in data['data']:
             opt_data   = option.get('put_options' if option_type == "PUT" else 'call_options', {})
@@ -153,7 +154,12 @@ def get_option_strike(option_type="PUT"):
 
             if not instrument or premium <= 0:
                 continue
+
+            # Debug log
+            log(f"   Strike:{strike} | Delta:{delta:.2f} | Premium:₹{premium} | Cost:₹{premium*LOT_SIZE:.0f}")
+
             if premium * LOT_SIZE > BUDGET:
+                log(f"   ❌ Budget exceed! ₹{premium*LOT_SIZE:.0f} > ₹{BUDGET}")
                 continue
 
             if option_type == "CALL":
