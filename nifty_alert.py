@@ -2,6 +2,8 @@ import requests
 import time
 import os
 import sys
+import gzip
+import json
 from datetime import datetime, time as dtime, timedelta
 import pytz
 
@@ -22,10 +24,27 @@ MARKET_CLOSE = dtime(23, 30)
 EOD_EXIT     = dtime(23, 0)
 
 # Trade settings
-LOT_SIZE  = 250              # 1 lot = 250 units
-FUT_KEY   = "MCX_FO|487466"  # NATGASMINI FUT 27 APR 26
-OPTION_UL = "MCX_FO|487466"  # Option chain underlying
-EXPIRY    = "2026-04-23"     # NatGas Mini expiry
+LOT_SIZE = 250             # 1 lot = 250 units
+FUT_KEY  = "MCX_FO|487466" # NATGASMINI FUT 27 APR 26
+
+# NatGas Mini CE strikes - 23 APR 26 (file se liye)
+# Key = strike price, Value = instrument_key
+NATGAS_CE_STRIKES = {
+    240: "MCX_FO|555643",
+    245: "MCX_FO|555642",
+    250: "MCX_FO|555641",
+    255: "MCX_FO|555640",
+    260: "MCX_FO|542907",
+    235: "MCX_FO|555644",
+    230: "MCX_FO|555645",
+    225: "MCX_FO|555646",
+    220: "MCX_FO|555647",
+    215: "MCX_FO|555648",
+    265: "MCX_FO|542906",
+    270: "MCX_FO|542905",
+    275: "MCX_FO|542904",
+    280: "MCX_FO|542903",
+}
 
 # =============================================
 # HELPERS
@@ -63,6 +82,58 @@ def is_eod():
     return ist_time() >= EOD_EXIT
 
 # =============================================
+# ATM CALL SELECT - MCX JSON se
+# =============================================
+def get_atm_call(spot):
+    """Spot ke sabse paas wala CE strike select karo"""
+    try:
+        best_strike = None
+        best_key    = None
+        best_diff   = float('inf')
+
+        for strike, key in NATGAS_CE_STRIKES.items():
+            diff = abs(strike - spot)
+            if diff < best_diff:
+                best_diff   = diff
+                best_strike = strike
+                best_key    = key
+
+        if best_strike:
+            log(f"✅ ATM CALL selected: {best_strike} CE | Key:{best_key} | Spot:{spot:.2f}")
+            return best_strike, best_key
+        return None, None
+    except Exception as e:
+        log(f"❌ ATM select error: {e}")
+        return None, None
+
+# =============================================
+# LTP FETCH
+# =============================================
+def get_natgas_ltp():
+    try:
+        encoded = FUT_KEY.replace("|", "%7C")
+        url     = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
+        r       = requests.get(url, headers=get_headers(), timeout=10)
+        data    = r.json()
+        if data.get('status') == 'success':
+            return float(list(data['data'].values())[0]['last_price'])
+        return None
+    except:
+        return None
+
+def get_current_premium(instrument_key):
+    try:
+        encoded = instrument_key.replace("|", "%7C")
+        url     = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
+        r       = requests.get(url, headers=get_headers(), timeout=10)
+        data    = r.json()
+        if data.get('status') == 'success':
+            return float(list(data['data'].values())[0]['last_price'])
+        return None
+    except:
+        return None
+
+# =============================================
 # 5 MIN CANDLES - NatGas Mini FUT
 # =============================================
 def get_candles_5min():
@@ -91,72 +162,6 @@ def get_candles_5min():
     except Exception as e:
         log(f"❌ Candle error: {e}")
         return None
-
-def get_natgas_ltp():
-    try:
-        encoded = FUT_KEY.replace("|", "%7C")
-        url     = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
-        r       = requests.get(url, headers=get_headers(), timeout=10)
-        data    = r.json()
-        if data.get('status') == 'success':
-            return float(list(data['data'].values())[0]['last_price'])
-        return None
-    except:
-        return None
-
-# =============================================
-# OPTION STRIKE - ATM CALL
-# =============================================
-def get_natgas_call():
-    try:
-        spot = get_natgas_ltp()
-        if not spot:
-            log("❌ NatGas LTP nahi mila!")
-            return None, None, None, None
-
-        url  = f"https://api.upstox.com/v2/option/chain?instrument_key={OPTION_UL}&expiry_date={EXPIRY}"
-        r    = requests.get(url, headers=get_headers(), timeout=10)
-        data = r.json()
-
-        if data.get('status') != 'success':
-            log(f"❌ Option chain error: {data}")
-            return None, None, None, None
-
-        log(f"🔍 CALL | Spot:{spot:.2f}")
-
-        best_strike = best_delta = best_premium = best_instrument = None
-        best_diff   = float('inf')
-
-        for option in data['data']:
-            opt_data   = option.get('call_options', {})
-            if not opt_data:
-                continue
-            premium    = opt_data.get('market_data', {}).get('ltp', 0)
-            strike     = option.get('strike_price', 0)
-            instrument = opt_data.get('instrument_key', '')
-            delta      = opt_data.get('option_greeks', {}).get('delta', 0)
-
-            if not instrument or premium <= 0:
-                continue
-
-            diff = abs(strike - spot)
-            if diff < best_diff:
-                best_diff       = diff
-                best_strike     = strike
-                best_delta      = delta
-                best_premium    = premium
-                best_instrument = instrument
-
-        if best_strike is None:
-            log(f"⚠️ CALL strike nahi mila!")
-            return None, None, None, None
-
-        log(f"✅ CALL | Strike:{best_strike} | Premium:₹{best_premium}")
-        return best_strike, best_delta, best_premium, best_instrument
-
-    except Exception as e:
-        log(f"❌ Option chain error: {e}")
-        return None, None, None, None
 
 # =============================================
 # ORDER
@@ -190,18 +195,6 @@ def place_order(instrument_key, transaction_type="BUY"):
         log(f"❌ Order error: {e}")
         return None
 
-def get_current_premium(instrument_key):
-    try:
-        encoded = instrument_key.replace("|", "%7C")
-        url     = f"https://api.upstox.com/v2/market-quote/ltp?instrument_key={encoded}"
-        r       = requests.get(url, headers=get_headers(), timeout=10)
-        data    = r.json()
-        if data.get('status') == 'success':
-            return float(list(data['data'].values())[0]['last_price'])
-        return None
-    except:
-        return None
-
 # =============================================
 # MAIN
 # =============================================
@@ -210,7 +203,7 @@ def main():
     send_alert(
         "🚀 <b>NatGas Mini Algo Started!</b>\n\n"
         "📊 Strategy: 5 Min Green Candle\n"
-        "🟢 Green candle = CALL BUY\n"
+        "🟢 Green candle = ATM CALL BUY\n"
         "⏱ Hold: 5 minutes then EXIT\n"
         "📦 Lot: 250 units\n"
         "1️⃣ 1 Trade per day only"
@@ -251,7 +244,7 @@ def main():
                 time.sleep(sleep_time)
                 continue
 
-            # Naya 5 min candle close hua?
+            # Naya 5 min candle?
             new_candle = len(candles) > prev_candle_count
             if new_candle:
                 prev_candle_count = len(candles)
@@ -263,16 +256,17 @@ def main():
 
             ltp = get_natgas_ltp()
 
-            # EOD EXIT
+            # EOD EXIT - 11 PM
             if trade is not None and is_eod():
                 curr_prem = get_current_premium(trade['instrument_key']) or trade['entry_premium']
                 pnl       = round((curr_prem - trade['entry_premium']) * LOT_SIZE, 2)
                 place_order(trade['instrument_key'], "SELL")
+                emoji = "✅" if pnl > 0 else "❌"
                 send_alert(
                     f"⏰ <b>EOD EXIT!</b>\n\n"
-                    f"📊 {trade['strike']} CALL\n"
+                    f"📊 {trade['strike']} CE\n"
                     f"💰 Entry:₹{trade['entry_premium']} Exit:₹{curr_prem}\n"
-                    f"📈 P&L: ₹{pnl}\n"
+                    f"{emoji} P&L: ₹{pnl}\n"
                     f"🕐 {now.strftime('%H:%M')} IST"
                 )
                 trade = None
@@ -282,16 +276,16 @@ def main():
             # 5 MIN BAAD EXIT
             if trade is not None and entry_time is not None:
                 elapsed = (now - entry_time).total_seconds()
-                log(f"[{now.strftime('%H:%M:%S')}] In trade | {elapsed:.0f}s / 300s | LTP:{ltp}")
+                log(f"[{now.strftime('%H:%M:%S')}] In trade | {elapsed:.0f}s/300s | LTP:{ltp}")
 
-                if elapsed >= 300:
+                if elapsed >= 300:  # 5 min = 300 sec
                     curr_prem = get_current_premium(trade['instrument_key']) or trade['entry_premium']
                     pnl       = round((curr_prem - trade['entry_premium']) * LOT_SIZE, 2)
                     emoji     = "✅" if pnl > 0 else "❌"
                     place_order(trade['instrument_key'], "SELL")
                     send_alert(
                         f"{emoji} <b>5 MIN EXIT!</b>\n\n"
-                        f"📊 {trade['strike']} CALL\n"
+                        f"📊 {trade['strike']} CE\n"
                         f"💰 Entry:₹{trade['entry_premium']} Exit:₹{curr_prem}\n"
                         f"📈 P&L: ₹{pnl}\n"
                         f"🕐 {now.strftime('%H:%M')} IST"
@@ -301,36 +295,49 @@ def main():
                     time.sleep(sleep_time)
                     continue
 
-            # GREEN CANDLE PE CALL BUY
+            # GREEN CANDLE PE ENTRY
             elif trade is None and not traded_today and new_candle:
                 is_green = candle_close > candle_open
 
-                if is_green:
-                    log(f"🟢 Green! O:{candle_open} C:{candle_close} | CALL ENTRY!")
-                    opt_strike, opt_delta, opt_premium, opt_key = get_natgas_call()
-                    if opt_strike and opt_key:
-                        order_id = place_order(opt_key, "BUY")
+                if is_green and ltp:
+                    log(f"🟢 Green! O:{candle_open} C:{candle_close} | ATM CALL ENTRY!")
+
+                    # ATM strike select karo
+                    atm_strike, atm_key = get_atm_call(ltp)
+
+                    if atm_strike and atm_key:
+                        # Premium fetch karo
+                        premium = get_current_premium(atm_key)
+                        if not premium:
+                            log("⚠️ Premium nahi mila!")
+                            time.sleep(sleep_time)
+                            continue
+
+                        order_id = place_order(atm_key, "BUY")
                         if order_id:
                             trade = {
-                                'instrument_key': opt_key,
-                                'strike'        : opt_strike,
-                                'entry_premium' : opt_premium,
+                                'instrument_key': atm_key,
+                                'strike'        : atm_strike,
+                                'entry_premium' : premium,
                             }
                             entry_time   = now
                             traded_today = True
                             send_alert(
                                 f"📈 <b>CALL ENTRY! (Green Candle)</b>\n\n"
-                                f"📊 Strike: {opt_strike} CALL\n"
+                                f"📊 Strike: {atm_strike} CE\n"
                                 f"🕯 Open:{candle_open} → Close:{candle_close}\n"
-                                f"💰 Premium: ₹{opt_premium}\n"
+                                f"💰 Premium: ₹{premium}\n"
                                 f"⏱ Exit: 5 min baad\n"
                                 f"📦 Qty: {LOT_SIZE}\n"
                                 f"🕐 {now.strftime('%H:%M')} IST"
                             )
                     else:
-                        log("⚠️ Strike nahi mila!")
+                        log(f"⚠️ ATM strike nahi mila! LTP:{ltp}")
+                        send_alert(f"⚠️ ATM strike nahi mila! LTP:{ltp}")
+
                 else:
-                    log(f"[{now.strftime('%H:%M')}] Red candle - skip | O:{candle_open} C:{candle_close}")
+                    if not is_green:
+                        log(f"[{now.strftime('%H:%M')}] Red candle - skip | O:{candle_open} C:{candle_close}")
 
             log(f"[{now.strftime('%H:%M:%S')}] Trade:{trade is not None} | Traded:{traded_today}")
 
