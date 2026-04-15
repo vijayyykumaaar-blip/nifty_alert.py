@@ -167,7 +167,7 @@ def get_option_strike(option_type="PUT"):
 
 def place_order(instrument_key, transaction_type="BUY"):
     try:
-        url     = "https://api.upstox.com/v2/order/place"
+        url     = "https://api-hft.upstox.com/v3/order/place"
         payload = {
             "quantity"          : LOT_SIZE,
             "product"           : "D",
@@ -179,7 +179,8 @@ def place_order(instrument_key, transaction_type="BUY"):
             "transaction_type"  : transaction_type,
             "disclosed_quantity": 0,
             "trigger_price"     : 0,
-            "is_amo"            : False
+            "is_amo"            : False,
+            "slice"             : True
         }
         r    = requests.post(url, headers=get_headers(), json=payload, timeout=10)
         data = r.json()
@@ -281,6 +282,13 @@ def main():
 
             # Market closed - 15 min sleep
             if not is_market_open():
+                # Agar trade open hai aur market band ho raha hai - EOD exit pehle!
+                if in_trade and instrument_key:
+                    log(f"[{now.strftime('%H:%M')}] Market band - EOD exit pehle!")
+                    exit_trade(instrument_key, algo_direction, entry_premium, strike, "⏰ EOD EXIT (Market Close)", now)
+                    in_trade     = False
+                    trail_active = False
+                    trail_sl     = None
                 log(f"[{now.strftime('%H:%M')}] Market closed. Sleep 15 min...")
                 time.sleep(900)
                 continue
@@ -497,20 +505,24 @@ def main():
                     # Agle candle ka open = entry (next 10 sec check mein milega)
                     opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("CALL")
                     if opt_strike and opt_key:
+                        # in_trade PEHLE True karo - duplicate order se bachao!
+                        in_trade       = True
+                        algo_direction = "CALL"
+                        entry_price    = nifty_ltp
+                        entry_premium  = opt_premium
+                        hard_sl        = breakout_level
+                        instrument_key = opt_key
+                        strike         = opt_strike
+                        entry_delta    = opt_delta
+                        best_nifty     = nifty_ltp
+                        trail_active   = False
+                        trail_sl       = None
+                        flip_done      = False
                         order_id = place_order(opt_key, "BUY")
-                        if order_id:
-                            in_trade       = True
-                            algo_direction = "CALL"
-                            entry_price    = nifty_ltp
-                            entry_premium  = opt_premium
-                            hard_sl        = breakout_level
-                            instrument_key = opt_key
-                            strike         = opt_strike
-                            entry_delta    = opt_delta
-                            best_nifty     = nifty_ltp
-                            trail_active   = False
-                            trail_sl       = None
-                            flip_done      = False
+                        if not order_id:
+                            # Order fail hua - reset karo
+                            in_trade = False
+                            instrument_key = None
 
                             send_alert(
                                 f"📈 <b>CALL ENTRY! (MC Body Breakout)</b>\n\n"
@@ -534,20 +546,24 @@ def main():
 
                     opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("PUT")
                     if opt_strike and opt_key:
+                        # in_trade PEHLE True karo - duplicate order se bachao!
+                        in_trade       = True
+                        algo_direction = "PUT"
+                        entry_price    = nifty_ltp
+                        entry_premium  = opt_premium
+                        hard_sl        = breakout_level
+                        instrument_key = opt_key
+                        strike         = opt_strike
+                        entry_delta    = opt_delta
+                        best_nifty     = nifty_ltp
+                        trail_active   = False
+                        trail_sl       = None
+                        flip_done      = False
                         order_id = place_order(opt_key, "BUY")
-                        if order_id:
-                            in_trade       = True
-                            algo_direction = "PUT"
-                            entry_price    = nifty_ltp
-                            entry_premium  = opt_premium
-                            hard_sl        = breakout_level
-                            instrument_key = opt_key
-                            strike         = opt_strike
-                            entry_delta    = opt_delta
-                            best_nifty     = nifty_ltp
-                            trail_active   = False
-                            trail_sl       = None
-                            flip_done      = False
+                        if not order_id:
+                            # Order fail hua - reset karo
+                            in_trade = False
+                            instrument_key = None
 
                             send_alert(
                                 f"📉 <b>PUT ENTRY! (MC Body Breakout)</b>\n\n"
