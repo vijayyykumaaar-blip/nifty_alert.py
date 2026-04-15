@@ -281,18 +281,20 @@ def main():
     day_low        = float('inf')
 
     # Trade state
-    in_trade       = False
-    algo_direction = None
-    entry_price    = None
-    entry_premium  = None
-    hard_sl        = None
-    instrument_key = None
-    strike         = None
-    entry_delta    = None
-    trail_active   = False
-    trail_sl       = None
-    best_nifty     = None
-    flip_done      = False
+    in_trade        = False
+    algo_direction  = None
+    entry_price     = None
+    entry_premium   = None
+    hard_sl         = None
+    instrument_key  = None
+    strike          = None
+    entry_delta     = None
+    trail_active    = False
+    trail_sl        = None
+    best_nifty      = None
+    flip_done       = False
+    trade_day_high  = 0              # Entry ke baad ka high (CALL ke liye)
+    trade_day_low   = float('inf')   # Entry ke baad ka low (PUT ke liye)
 
     while True:
         try:
@@ -309,19 +311,21 @@ def main():
                 direction_done = False
                 day_high       = 0
                 day_low        = float('inf')
-                in_trade       = False
-                algo_direction = None
-                entry_price    = None
-                entry_premium  = None
-                hard_sl        = None
-                instrument_key = None
-                strike         = None
-                entry_delta    = None
-                trail_active   = False
-                trail_sl       = None
-                best_nifty     = None
-                flip_done      = False
-                last_reset     = today
+                in_trade        = False
+                algo_direction  = None
+                entry_price     = None
+                entry_premium   = None
+                hard_sl         = None
+                instrument_key  = None
+                strike          = None
+                entry_delta     = None
+                trail_active    = False
+                trail_sl        = None
+                best_nifty      = None
+                flip_done       = False
+                trade_day_high  = 0
+                trade_day_low   = float('inf')
+                last_reset      = today
                 log(f"🔄 Daily reset! {today}")
 
             # =============================================
@@ -406,16 +410,22 @@ def main():
             # TRADE MONITOR
             # =============================================
             if in_trade and instrument_key and nifty_ltp:
-                log(f"[{now.strftime('%H:%M:%S')}] IN TRADE | LTP:{nifty_ltp} | SL:{hard_sl} | Trail:{trail_sl} | High:{day_high} | Low:{day_low}")
+                # Trade ke baad ka high/low update karo
+                if nifty_ltp > trade_day_high:
+                    trade_day_high = nifty_ltp
+                if nifty_ltp < trade_day_low:
+                    trade_day_low = nifty_ltp
+
+                log(f"[{now.strftime('%H:%M:%S')}] IN TRADE | LTP:{nifty_ltp} | SL:{hard_sl} | Trail:{trail_sl} | TradeHigh:{trade_day_high} | TradeLow:{trade_day_low}")
 
                 # 2:15 PM ke baad profit booking + trail
                 if is_trail_time():
 
                     if algo_direction == "PUT":
-                        # PUT: Day Low ke 40 pts paas - real time
-                        if nifty_ltp <= day_low + NEAR_PTS:
-                            log(f"💰 PUT Profit book! LTP:{nifty_ltp} near Day Low:{day_low}")
-                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day Low)")
+                        # PUT: Trade Low ke 40 pts paas - real time
+                        if nifty_ltp <= trade_day_low + NEAR_PTS:
+                            log(f"💰 PUT Profit book! LTP:{nifty_ltp} near Trade Low:{trade_day_low}")
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Trade Low)")
                             in_trade = False; trail_active = False; trail_sl = None
                             time.sleep(sleep_time)
                             continue
@@ -440,10 +450,10 @@ def main():
                             continue
 
                     else:  # CALL
-                        # CALL: Day High ke 40 pts paas - real time
-                        if nifty_ltp >= day_high - NEAR_PTS:
-                            log(f"💰 CALL Profit book! LTP:{nifty_ltp} near Day High:{day_high}")
-                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day High)")
+                        # CALL: Trade High ke 40 pts paas - real time
+                        if nifty_ltp >= trade_day_high - NEAR_PTS:
+                            log(f"💰 CALL Profit book! LTP:{nifty_ltp} near Trade High:{trade_day_high}")
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Trade High)")
                             in_trade = False; trail_active = False; trail_sl = None
                             time.sleep(sleep_time)
                             continue
