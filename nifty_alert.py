@@ -2,68 +2,84 @@ import requests
 import time
 import os
 import sys
-import numpy as np
 import pandas as pd
 from datetime import datetime, time as dtime, timedelta
 import pytz
 
 sys.stdout.flush()
 
+# =============================================
+# CONFIG
+# =============================================
 TELEGRAM_TOKEN = "8754909402:AAGiudQUtZQeG_LjzF4LcFJ5ca9ScUD7ZN0"
 CHAT_ID        = "948684099"
 UPSTOX_TOKEN   = os.environ.get("UPSTOX_TOKEN")
 
-IST          = pytz.timezone("Asia/Kolkata")
-MARKET_OPEN  = dtime(8, 45)
-TRADE_START  = dtime(9, 40)
-MARKET_CLOSE = dtime(15, 30)
-EOD_EXIT     = dtime(15, 0)
-PROFIT_TIME  = dtime(14, 15)  # 2:15 PM profit booking
-NO_TRADE     = dtime(14, 30)  # 2:30 PM ke baad no new trade
+IST = pytz.timezone("Asia/Kolkata")
 
-LOT_SIZE       = 130   # 2 lots fixed
-TRAIL_PTS      = 10
-BUDGET         = 14000 # Max budget
-CALL_DELTA_MIN = 0.18  # CALL delta positive
+# Market timing
+MARKET_OPEN  = dtime(8, 45)   # Script active
+MARKET_CLOSE = dtime(15, 30)  # Script sleep
+TRADE_START  = dtime(9, 45)   # 9:45 - pehli direction candle close hoti hai
+NO_TRADE     = dtime(14, 30)  # 2:30 ke baad naya trade nahi
+EOD_EXIT     = dtime(15, 0)   # 3:00 PM mandatory exit
+TRAIL_TIME   = dtime(14, 15)  # 2:15 ke baad trail/profit
+
+# Trade settings
+LOT_SIZE       = 130    # 2 lots
+TRAIL_PTS      = 10     # Trail step
+BUDGET         = 14000  # Max budget
+CALL_DELTA_MIN = 0.18   # CALL delta positive
 CALL_DELTA_MAX = 0.30
-PUT_DELTA_MIN  = -0.30 # PUT delta negative
+PUT_DELTA_MIN  = -0.30  # PUT delta negative
 PUT_DELTA_MAX  = -0.18
-NEAR_PTS       = 40    # 40 points near day high/low
+NEAR_PTS       = 40     # Profit booking buffer
 
+# =============================================
+# HELPERS
+# =============================================
 def log(msg):
     print(msg, flush=True)
 
-def send_alert(message):
+def send_alert(msg):
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
+    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload, timeout=10)
         log("✅ Alert sent!")
     except Exception as e:
         log(f"❌ Alert error: {e}")
 
-def is_market_open():
-    now = datetime.now(IST).time()
-    if datetime.now(IST).weekday() >= 5:
-        return False
-    return MARKET_OPEN <= now <= MARKET_CLOSE
-
-def can_trade():
-    now = datetime.now(IST).time()
-    return TRADE_START <= now < NO_TRADE
-
-def is_eod():
-    return datetime.now(IST).time() >= EOD_EXIT
-
-def is_profit_time():
-    return datetime.now(IST).time() >= PROFIT_TIME
-
 def get_headers():
     return {
         "Authorization": f"Bearer {UPSTOX_TOKEN}",
-        "Accept": "application/json"
+        "Accept"       : "application/json"
     }
 
+def ist_now():
+    return datetime.now(IST)
+
+def ist_time():
+    return datetime.now(IST).time()
+
+def is_market_open():
+    if ist_now().weekday() >= 5:  # Weekend
+        return False
+    return MARKET_OPEN <= ist_time() <= MARKET_CLOSE
+
+def can_trade():
+    t = ist_time()
+    return TRADE_START <= t < NO_TRADE
+
+def is_eod():
+    return ist_time() >= EOD_EXIT
+
+def is_trail_time():
+    return ist_time() >= TRAIL_TIME
+
+# =============================================
+# DATA FETCH
+# =============================================
 def get_candles_30min():
     try:
         url  = "https://api.upstox.com/v3/historical-candle/intraday/NSE_INDEX|Nifty%2050/minutes/30"
@@ -83,7 +99,9 @@ def get_candles_30min():
                 'low'  : float(c[3]),
                 'close': float(c[4])
             })
+        # Reverse - oldest pehle
         result = result[::-1]
+        # 9:15 se filter
         result = [c for c in result if c['time'][11:16] >= '09:15']
         return result if len(result) >= 2 else None
     except Exception as e:
@@ -101,13 +119,19 @@ def get_nifty_ltp():
     except:
         return None
 
+# =============================================
+# WEEKLY EXPIRY
+# =============================================
 def get_weekly_expiry():
-    today      = datetime.now(IST)
-    days_ahead = 3 - today.weekday()
+    today      = ist_now()
+    days_ahead = 3 - today.weekday()  # Thursday
     if days_ahead < 0:
         days_ahead += 7
     return (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
 
+# =============================================
+# OPTION STRIKE - DELTA BASED
+# =============================================
 def get_option_strike(option_type="PUT"):
     try:
         expiry = get_weekly_expiry()
@@ -115,13 +139,13 @@ def get_option_strike(option_type="PUT"):
         r      = requests.get(url, headers=get_headers(), timeout=10)
         data   = r.json()
         if data.get('status') != 'success':
+            log(f"❌ Option chain error: {data}")
             return None, None, None, None
 
         best_strike = best_delta = best_premium = best_instrument = None
-        max_premium = BUDGET / LOT_SIZE  # 14000 / 130 = ~107
 
         for option in data['data']:
-            # Upstox API: call_options = positive delta, put_options = negative delta
+            # Upstox: call_options = positive delta, put_options = negative delta
             opt_data   = option.get('put_options' if option_type == "PUT" else 'call_options', {})
             if not opt_data:
                 continue
@@ -132,7 +156,10 @@ def get_option_strike(option_type="PUT"):
             strike     = option.get('strike_price', 0)
             instrument = opt_data.get('instrument_key', '')
 
-            # Budget check - 2 lot affordable hona chahiye
+            if not instrument or premium <= 0:
+                continue
+
+            # Budget check
             if premium * LOT_SIZE > BUDGET:
                 continue
 
@@ -154,17 +181,20 @@ def get_option_strike(option_type="PUT"):
                         best_instrument = instrument
 
         if best_strike is None:
-            log(f"⚠️ {option_type} strike nahi mila! Delta range ya budget check karo. Trade skip.")
-            send_alert(f"⚠️ <b>{option_type} Strike nahi mila!</b>\nDelta 0.18-0.30 range ya budget ₹{BUDGET} check karo!")
+            log(f"⚠️ {option_type} strike nahi mila!")
+            send_alert(f"⚠️ <b>{option_type} Strike nahi mila!</b>\nDelta range ya budget check karo!")
             return None, None, None, None
 
-        log(f"✅ {option_type} Strike: {best_strike} | Delta: {best_delta} | Premium: ₹{best_premium} | Cost: ₹{best_premium * LOT_SIZE}")
+        log(f"✅ {option_type} | Strike:{best_strike} | Delta:{best_delta:.2f} | Premium:₹{best_premium} | Cost:₹{round(best_premium*LOT_SIZE,0)}")
         return best_strike, best_delta, best_premium, best_instrument
 
     except Exception as e:
         log(f"❌ Option chain error: {e}")
         return None, None, None, None
 
+# =============================================
+# ORDER PLACEMENT - V3 API
+# =============================================
 def place_order(instrument_key, transaction_type="BUY"):
     try:
         url     = "https://api-hft.upstox.com/v3/order/place"
@@ -185,8 +215,11 @@ def place_order(instrument_key, transaction_type="BUY"):
         r    = requests.post(url, headers=get_headers(), json=payload, timeout=10)
         data = r.json()
         if data.get('status') == 'success':
-            return data['data']['order_id']
+            order_id = data['data']['order_id']
+            log(f"✅ Order placed! ID: {order_id}")
+            return order_id
         else:
+            log(f"❌ Order failed: {data}")
             send_alert(f"❌ <b>Order fail!</b>\n{data}")
             return None
     except Exception as e:
@@ -205,39 +238,49 @@ def get_current_premium(instrument_key):
     except:
         return None
 
-def exit_trade(instrument_key, algo_direction, entry_premium, strike, reason, now):
-    curr_prem = get_current_premium(instrument_key) or entry_premium
+def do_exit(instrument_key, direction, entry_prem, strike_val, reason):
+    curr_prem = get_current_premium(instrument_key) or entry_prem
     place_order(instrument_key, "SELL")
-    if algo_direction == "PUT":
-        pnl = round((entry_premium - curr_prem) * LOT_SIZE, 2)
+    now = ist_now()
+    if direction == "PUT":
+        pnl = round((entry_prem - curr_prem) * LOT_SIZE, 2)
     else:
-        pnl = round((curr_prem - entry_premium) * LOT_SIZE, 2)
+        pnl = round((curr_prem - entry_prem) * LOT_SIZE, 2)
+    emoji = "✅" if pnl > 0 else "❌"
     send_alert(
-        f"{'✅' if pnl > 0 else '❌'} <b>{reason}</b>\n\n"
-        f"📊 {strike} {algo_direction}\n"
-        f"💰 Entry: ₹{entry_premium} | Exit: ₹{curr_prem}\n"
+        f"{emoji} <b>{reason}</b>\n\n"
+        f"📊 {strike_val} {direction}\n"
+        f"💰 Entry: ₹{entry_prem} | Exit: ₹{curr_prem}\n"
         f"📈 P&L: ₹{pnl}\n"
         f"🕐 {now.strftime('%H:%M')} IST"
     )
     return pnl
 
+# =============================================
+# MAIN
+# =============================================
 def main():
     log("🚀 MC Body Breakout + Flip ALGO Started!")
-    send_alert("🚀 <b>MC Body Breakout Algo Started!</b>\nMarket open hone ka wait kar raha hoon...")
+    send_alert(
+        "🚀 <b>MC Body Breakout Algo Started!</b>\n"
+        "⏰ Mother Candle: 9:15 AM\n"
+        "📊 Direction: 9:45 AM onwards\n"
+        "🛑 No new trade after: 2:30 PM\n"
+        "💰 Trail/Profit: 2:15 PM onwards\n"
+        "⏰ EOD Exit: 3:00 PM"
+    )
 
-    # Daily variables
     last_reset     = None
-    mother_candle  = None   # 9:15 AM candle
+
+    # Daily state
+    mother_candle  = None
     body_top       = None
     body_bottom    = None
-    direction_done = False  # Direction mil gayi?
-    trade_type     = None   # CALL ya PUT
-    breakout_level = None   # SL level
-    flip_done      = False  # Flip already hua?
+    direction_done = False
     day_high       = 0
     day_low        = float('inf')
 
-    # Trade variables
+    # Trade state
     in_trade       = False
     algo_direction = None
     entry_price    = None
@@ -249,21 +292,21 @@ def main():
     trail_active   = False
     trail_sl       = None
     best_nifty     = None
+    flip_done      = False
 
     while True:
         try:
-            now   = datetime.now(IST)
+            now   = ist_now()
             today = now.date()
 
-            # Daily reset
+            # =============================================
+            # DAILY RESET
+            # =============================================
             if last_reset != today:
                 mother_candle  = None
                 body_top       = None
                 body_bottom    = None
                 direction_done = False
-                trade_type     = None
-                breakout_level = None
-                flip_done      = False
                 day_high       = 0
                 day_low        = float('inf')
                 in_trade       = False
@@ -277,15 +320,18 @@ def main():
                 trail_active   = False
                 trail_sl       = None
                 best_nifty     = None
+                flip_done      = False
                 last_reset     = today
                 log(f"🔄 Daily reset! {today}")
 
-            # Market closed - 15 min sleep
+            # =============================================
+            # MARKET CLOSED CHECK - IST
+            # =============================================
             if not is_market_open():
-                # Agar trade open hai aur market band ho raha hai - EOD exit pehle!
+                # Agar trade open hai to EOD exit karo pehle
                 if in_trade and instrument_key:
-                    log(f"[{now.strftime('%H:%M')}] Market band - EOD exit pehle!")
-                    exit_trade(instrument_key, algo_direction, entry_premium, strike, "⏰ EOD EXIT (Market Close)", now)
+                    log(f"[{now.strftime('%H:%M')}] Market band - Force EOD exit!")
+                    do_exit(instrument_key, algo_direction, entry_premium, strike, "⏰ EOD EXIT (Market Close)")
                     in_trade     = False
                     trail_active = False
                     trail_sl     = None
@@ -293,9 +339,12 @@ def main():
                 time.sleep(900)
                 continue
 
+            # Market open - 10 sec polling
             sleep_time = 10
 
-            # 30 min candles fetch
+            # =============================================
+            # CANDLES FETCH
+            # =============================================
             candles = get_candles_30min()
             if not candles or len(candles) < 1:
                 log(f"[{now.strftime('%H:%M')}] No candle data! Sleep 15 min...")
@@ -309,14 +358,16 @@ def main():
                 if c['low'] < day_low:
                     day_low = c['low']
 
-            # Mother candle = 9:15 AM (pehli candle)
-            if mother_candle is None and len(candles) >= 1:
-                first = candles[0]
-                if first['time'][11:16] == '09:15':
-                    mother_candle = first
-                    body_top      = max(first['open'], first['close'])
-                    body_bottom   = min(first['open'], first['close'])
-                    log(f"✅ Mother Candle set! Body Top:{body_top:.0f} Bottom:{body_bottom:.0f}")
+            # =============================================
+            # MOTHER CANDLE SET - 9:15 AM
+            # =============================================
+            if mother_candle is None:
+                first_candle = candles[0]
+                if first_candle['time'][11:16] == '09:15':
+                    mother_candle = first_candle
+                    body_top      = round(max(first_candle['open'], first_candle['close']), 2)
+                    body_bottom   = round(min(first_candle['open'], first_candle['close']), 2)
+                    log(f"✅ Mother Candle! Body Top:{body_top} Bottom:{body_bottom}")
                     send_alert(
                         f"📊 <b>Mother Candle Set!</b>\n\n"
                         f"🔴 Body Top: {body_top}\n"
@@ -324,26 +375,27 @@ def main():
                         f"🕐 {now.strftime('%H:%M')} IST"
                     )
 
-            # Mother candle set nahi hua abhi
-            if mother_candle is None:
+            # Mother candle abhi nahi bani
+            if mother_candle is None or body_top is None:
+                log(f"[{now.strftime('%H:%M')}] Mother candle ka wait...")
                 time.sleep(sleep_time)
                 continue
 
-            # Last closed candle
+            # Last CLOSED candle
             last_closed  = candles[-2] if len(candles) >= 2 else candles[-1]
             candle_close = last_closed['close']
             candle_high  = last_closed['high']
             candle_low   = last_closed['low']
-            candle_time  = last_closed['time'][11:16]
 
             # Nifty LTP
             nifty_ltp = get_nifty_ltp()
 
             # =============================================
-            # EOD EXIT - 3 PM
+            # EOD EXIT - 3:00 PM
             # =============================================
             if in_trade and is_eod():
-                exit_trade(instrument_key, algo_direction, entry_premium, strike, "EOD EXIT", now)
+                log(f"[{now.strftime('%H:%M')}] EOD exit!")
+                do_exit(instrument_key, algo_direction, entry_premium, strike, "⏰ EOD EXIT (3 PM)")
                 in_trade     = False
                 trail_active = False
                 trail_sl     = None
@@ -354,53 +406,21 @@ def main():
             # TRADE MONITOR
             # =============================================
             if in_trade and instrument_key and nifty_ltp:
-                log(f"[{now.strftime('%H:%M:%S')}] LTP:{nifty_ltp} | SL:{hard_sl} | Trail:{trail_sl}")
+                log(f"[{now.strftime('%H:%M:%S')}] IN TRADE | LTP:{nifty_ltp} | SL:{hard_sl} | Trail:{trail_sl} | High:{day_high} | Low:{day_low}")
 
-                # 2:15 PM KE BAAD PROFIT BOOKING - IST check
-                now_ist_check = datetime.now(IST)
-                if now_ist_check.time() >= dtime(14, 15):
-                    if algo_direction == "PUT" and nifty_ltp <= day_low + NEAR_PTS:
-                        exit_trade(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day Low)", now_ist_check)
-                        in_trade = False; trail_active = False; trail_sl = None
-                        time.sleep(sleep_time)
-                        continue
+                # 2:15 PM ke baad profit booking + trail
+                if is_trail_time():
 
-                    elif algo_direction == "CALL" and nifty_ltp >= day_high - NEAR_PTS:
-                        exit_trade(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day High)", now_ist_check)
-                        in_trade = False; trail_active = False; trail_sl = None
-                        time.sleep(sleep_time)
-                        continue
-
-                # Trail + Profit booking - SIRF 2:15 PM KE BAAD IST
-                now_ist = datetime.now(IST)
-                after_215 = now_ist.time() >= dtime(14, 15)
-
-                if algo_direction == "CALL":
-                    if after_215:
-                        # Best price update
-                        if nifty_ltp > best_nifty:
-                            best_nifty = nifty_ltp
-                            if trail_active:
-                                trail_sl = round(best_nifty - TRAIL_PTS, 2)
-
-                        # Trail activate
-                        if not trail_active and nifty_ltp > entry_price:
-                            trail_active = True
-                            trail_sl     = round(nifty_ltp - TRAIL_PTS, 2)
-                            send_alert(f"🎯 <b>TRAIL ON! (2:15+)</b>\nTrail SL: {trail_sl}\n🕐 {now_ist.strftime('%H:%M')} IST")
-
-                        # Trail SL hit - real time
-                        if trail_active and trail_sl and nifty_ltp <= trail_sl:
-                            exit_trade(instrument_key, algo_direction, entry_premium, strike, "✅ TRAIL EXIT", now_ist)
+                    if algo_direction == "PUT":
+                        # PUT: Day Low ke 40 pts paas - real time
+                        if nifty_ltp <= day_low + NEAR_PTS:
+                            log(f"💰 PUT Profit book! LTP:{nifty_ltp} near Day Low:{day_low}")
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day Low)")
                             in_trade = False; trail_active = False; trail_sl = None
                             time.sleep(sleep_time)
                             continue
-                    else:
-                        log(f"[{now_ist.strftime('%H:%M:%S')}] 2:15 se pehle - trail nahi karenge")
 
-                else:  # PUT
-                    if after_215:
-                        # Best price update
+                        # Trail update
                         if nifty_ltp < best_nifty:
                             best_nifty = nifty_ltp
                             if trail_active:
@@ -410,41 +430,69 @@ def main():
                         if not trail_active and nifty_ltp < entry_price:
                             trail_active = True
                             trail_sl     = round(nifty_ltp + TRAIL_PTS, 2)
-                            send_alert(f"🎯 <b>TRAIL ON! (2:15+)</b>\nTrail SL: {trail_sl}\n🕐 {now_ist.strftime('%H:%M')} IST")
+                            send_alert(f"🎯 <b>TRAIL ON!</b>\nTrail SL: {trail_sl}\n🕐 {now.strftime('%H:%M')} IST")
 
-                        # Trail SL hit - real time
+                        # Trail hit - real time
                         if trail_active and trail_sl and nifty_ltp >= trail_sl:
-                            exit_trade(instrument_key, algo_direction, entry_premium, strike, "✅ TRAIL EXIT", now_ist)
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "✅ TRAIL EXIT")
                             in_trade = False; trail_active = False; trail_sl = None
                             time.sleep(sleep_time)
                             continue
-                    else:
-                        log(f"[{now_ist.strftime('%H:%M:%S')}] 2:15 se pehle - trail nahi karenge")
 
-                # SL check - CANDLE CLOSE pe
+                    else:  # CALL
+                        # CALL: Day High ke 40 pts paas - real time
+                        if nifty_ltp >= day_high - NEAR_PTS:
+                            log(f"💰 CALL Profit book! LTP:{nifty_ltp} near Day High:{day_high}")
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "💰 PROFIT BOOK (Near Day High)")
+                            in_trade = False; trail_active = False; trail_sl = None
+                            time.sleep(sleep_time)
+                            continue
+
+                        # Trail update
+                        if nifty_ltp > best_nifty:
+                            best_nifty = nifty_ltp
+                            if trail_active:
+                                trail_sl = round(best_nifty - TRAIL_PTS, 2)
+
+                        # Trail activate
+                        if not trail_active and nifty_ltp > entry_price:
+                            trail_active = True
+                            trail_sl     = round(nifty_ltp - TRAIL_PTS, 2)
+                            send_alert(f"🎯 <b>TRAIL ON!</b>\nTrail SL: {trail_sl}\n🕐 {now.strftime('%H:%M')} IST")
+
+                        # Trail hit - real time
+                        if trail_active and trail_sl and nifty_ltp <= trail_sl:
+                            do_exit(instrument_key, algo_direction, entry_premium, strike, "✅ TRAIL EXIT")
+                            in_trade = False; trail_active = False; trail_sl = None
+                            time.sleep(sleep_time)
+                            continue
+
+                # SL check - CANDLE CLOSE pe (hamesha)
                 if algo_direction == "CALL" and candle_close < hard_sl:
-                    exit_trade(instrument_key, algo_direction, entry_premium, strike, "🛑 SL HIT (Candle Close)", now)
+                    log(f"🛑 CALL SL hit! Close:{candle_close} < SL:{hard_sl}")
+                    do_exit(instrument_key, algo_direction, entry_premium, strike, "🛑 SL HIT")
                     in_trade = False; trail_active = False; trail_sl = None
 
-                    # FLIP to PUT - same SL level - agar flip nahi hua
-                    if not flip_done and can_trade():
+                    # FLIP to PUT - sirf ek baar, 2:30 se pehle
+                    if not flip_done and can_trade() and nifty_ltp:
                         flip_done = True
-                        log(f"🔄 Flip to PUT | SL same: {hard_sl:.0f}")
                         opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("PUT")
                         if opt_strike and opt_key:
+                            in_trade       = True
+                            algo_direction = "PUT"
+                            entry_price    = nifty_ltp
+                            entry_premium  = opt_premium
+                            instrument_key = opt_key
+                            strike         = opt_strike
+                            entry_delta    = opt_delta
+                            best_nifty     = nifty_ltp
+                            trail_active   = False
+                            trail_sl       = None
+                            # hard_sl SAME rehta hai!
                             order_id = place_order(opt_key, "BUY")
-                            if order_id:
-                                in_trade       = True
-                                algo_direction = "PUT"
-                                entry_price    = nifty_ltp
-                                entry_premium  = opt_premium
-                                instrument_key = opt_key
-                                strike         = opt_strike
-                                entry_delta    = opt_delta
-                                best_nifty     = nifty_ltp
-                                trail_active   = False
-                                trail_sl       = None
-                                # hard_sl same rehta hai!
+                            if not order_id:
+                                in_trade = False; instrument_key = None
+                            else:
                                 send_alert(
                                     f"🔄 <b>FLIP → PUT!</b>\n\n"
                                     f"📊 Strike: {strike} PUT\n"
@@ -454,28 +502,30 @@ def main():
                                 )
 
                 elif algo_direction == "PUT" and candle_close > hard_sl:
-                    exit_trade(instrument_key, algo_direction, entry_premium, strike, "🛑 SL HIT (Candle Close)", now)
+                    log(f"🛑 PUT SL hit! Close:{candle_close} > SL:{hard_sl}")
+                    do_exit(instrument_key, algo_direction, entry_premium, strike, "🛑 SL HIT")
                     in_trade = False; trail_active = False; trail_sl = None
 
-                    # FLIP to CALL - same SL level - agar flip nahi hua
-                    if not flip_done and can_trade():
+                    # FLIP to CALL - sirf ek baar, 2:30 se pehle
+                    if not flip_done and can_trade() and nifty_ltp:
                         flip_done = True
-                        log(f"🔄 Flip to CALL | SL same: {hard_sl:.0f}")
                         opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("CALL")
                         if opt_strike and opt_key:
+                            in_trade       = True
+                            algo_direction = "CALL"
+                            entry_price    = nifty_ltp
+                            entry_premium  = opt_premium
+                            instrument_key = opt_key
+                            strike         = opt_strike
+                            entry_delta    = opt_delta
+                            best_nifty     = nifty_ltp
+                            trail_active   = False
+                            trail_sl       = None
+                            # hard_sl SAME rehta hai!
                             order_id = place_order(opt_key, "BUY")
-                            if order_id:
-                                in_trade       = True
-                                algo_direction = "CALL"
-                                entry_price    = nifty_ltp
-                                entry_premium  = opt_premium
-                                instrument_key = opt_key
-                                strike         = opt_strike
-                                entry_delta    = opt_delta
-                                best_nifty     = nifty_ltp
-                                trail_active   = False
-                                trail_sl       = None
-                                # hard_sl same rehta hai!
+                            if not order_id:
+                                in_trade = False; instrument_key = None
+                            else:
                                 send_alert(
                                     f"🔄 <b>FLIP → CALL!</b>\n\n"
                                     f"📊 Strike: {strike} CALL\n"
@@ -485,32 +535,22 @@ def main():
                                 )
 
             # =============================================
-            # ENTRY CHECK - MC Body Breakout
+            # ENTRY CHECK - MC BODY BREAKOUT
             # =============================================
             elif not in_trade and not direction_done and can_trade():
 
-                if body_top is None or body_bottom is None:
-                    time.sleep(sleep_time)
-                    continue
-
-                # Direction candle check
                 if candle_close > body_top:
-                    # CALL setup
+                    # CALL breakout
                     direction_done = True
-                    trade_type     = "CALL"
-                    breakout_level = candle_low   # CALL: Breakout candle ka Low = SL
+                    hard_sl        = candle_low   # SL = Breakout candle Low
+                    log(f"🎯 CALL! Close:{candle_close} > Body Top:{body_top} | SL:{hard_sl}")
 
-                    log(f"🎯 CALL Direction! Close:{candle_close:.0f} > Body Top:{body_top:.0f} | SL:{breakout_level:.0f}")
-
-                    # Agle candle ka open = entry (next 10 sec check mein milega)
                     opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("CALL")
                     if opt_strike and opt_key:
-                        # in_trade PEHLE True karo - duplicate order se bachao!
-                        in_trade       = True
+                        in_trade       = True  # PEHLE set karo - duplicate se bachao
                         algo_direction = "CALL"
                         entry_price    = nifty_ltp
                         entry_premium  = opt_premium
-                        hard_sl        = breakout_level
                         instrument_key = opt_key
                         strike         = opt_strike
                         entry_delta    = opt_delta
@@ -518,40 +558,34 @@ def main():
                         trail_active   = False
                         trail_sl       = None
                         flip_done      = False
+
                         order_id = place_order(opt_key, "BUY")
                         if not order_id:
-                            # Order fail hua - reset karo
-                            in_trade = False
-                            instrument_key = None
-
+                            in_trade = False; instrument_key = None
+                        else:
                             send_alert(
-                                f"📈 <b>CALL ENTRY! (MC Body Breakout)</b>\n\n"
+                                f"📈 <b>CALL ENTRY!</b>\n\n"
                                 f"📊 Strike: {strike} CALL\n"
                                 f"💰 Premium: ₹{entry_premium}\n"
-                                f"📍 Body Top: {body_top} | Body Bottom: {body_bottom}\n"
-                                f"🛑 SL: {hard_sl} (Candle close pe)\n"
-                                f"🔄 Trail: {TRAIL_PTS} pts (Real time)\n"
-                                f"📉 Delta: {entry_delta}\n"
-                                f"📦 Qty: {LOT_SIZE}\n"
+                                f"📍 Body Top: {body_top}\n"
+                                f"🛑 SL: {hard_sl} (Candle close)\n"
+                                f"📉 Delta: {entry_delta:.2f}\n"
+                                f"📦 Qty: {LOT_SIZE} | Cost: ₹{round(entry_premium*LOT_SIZE,0)}\n"
                                 f"🕐 {now.strftime('%H:%M')} IST"
                             )
 
                 elif candle_close < body_bottom:
-                    # PUT setup
+                    # PUT breakout
                     direction_done = True
-                    trade_type     = "PUT"
-                    breakout_level = candle_high  # PUT: Breakout candle ka High = SL
-
-                    log(f"🎯 PUT Direction! Close:{candle_close:.0f} < Body Bottom:{body_bottom:.0f} | SL:{breakout_level:.0f}")
+                    hard_sl        = candle_high  # SL = Breakout candle High
+                    log(f"🎯 PUT! Close:{candle_close} < Body Bottom:{body_bottom} | SL:{hard_sl}")
 
                     opt_strike, opt_delta, opt_premium, opt_key = get_option_strike("PUT")
                     if opt_strike and opt_key:
-                        # in_trade PEHLE True karo - duplicate order se bachao!
-                        in_trade       = True
+                        in_trade       = True  # PEHLE set karo - duplicate se bachao
                         algo_direction = "PUT"
                         entry_price    = nifty_ltp
                         entry_premium  = opt_premium
-                        hard_sl        = breakout_level
                         instrument_key = opt_key
                         strike         = opt_strike
                         entry_delta    = opt_delta
@@ -559,30 +593,28 @@ def main():
                         trail_active   = False
                         trail_sl       = None
                         flip_done      = False
+
                         order_id = place_order(opt_key, "BUY")
                         if not order_id:
-                            # Order fail hua - reset karo
-                            in_trade = False
-                            instrument_key = None
-
+                            in_trade = False; instrument_key = None
+                        else:
                             send_alert(
-                                f"📉 <b>PUT ENTRY! (MC Body Breakout)</b>\n\n"
+                                f"📉 <b>PUT ENTRY!</b>\n\n"
                                 f"📊 Strike: {strike} PUT\n"
                                 f"💰 Premium: ₹{entry_premium}\n"
-                                f"📍 Body Top: {body_top} | Body Bottom: {body_bottom}\n"
-                                f"🛑 SL: {hard_sl} (Candle close pe)\n"
-                                f"🔄 Trail: {TRAIL_PTS} pts (Real time)\n"
-                                f"📉 Delta: {entry_delta}\n"
-                                f"📦 Qty: {LOT_SIZE}\n"
+                                f"📍 Body Bottom: {body_bottom}\n"
+                                f"🛑 SL: {hard_sl} (Candle close)\n"
+                                f"📉 Delta: {entry_delta:.2f}\n"
+                                f"📦 Qty: {LOT_SIZE} | Cost: ₹{round(entry_premium*LOT_SIZE,0)}\n"
                                 f"🕐 {now.strftime('%H:%M')} IST"
                             )
                 else:
-                    log(f"[{now.strftime('%H:%M')}] Body ke andar - wait... Close:{candle_close:.0f}")
+                    log(f"[{now.strftime('%H:%M')}] Body ke andar - wait | Close:{candle_close} | Top:{body_top} | Bottom:{body_bottom}")
 
-            log(f"[{now.strftime('%H:%M:%S')}] Trade:{in_trade} | Dir:{algo_direction} | Trail:{trail_active} | DayHigh:{day_high:.0f} | DayLow:{day_low:.0f}")
+            log(f"[{now.strftime('%H:%M:%S')}] Trade:{in_trade} | Dir:{algo_direction} | Trail:{trail_active} | High:{day_high} | Low:{day_low}")
 
         except Exception as e:
-            log(f"❌ Error: {e}")
+            log(f"❌ Main loop error: {e}")
             time.sleep(10)
             continue
 
