@@ -136,7 +136,6 @@ def get_weekly_expiry():
 # =============================================
 def get_option_strike(option_type="PUT"):
     try:
-        # Pehle Nifty spot price lo
         spot = get_nifty_ltp()
         if not spot:
             log("❌ Nifty LTP nahi mila!")
@@ -150,16 +149,15 @@ def get_option_strike(option_type="PUT"):
             log(f"❌ Option chain API error: {data}")
             return None, None, None, None
 
+        log(f"🔍 {option_type} | Spot:{spot:.0f} | Expiry:{expiry}")
+
         best_strike = best_delta = best_premium = best_instrument = None
         best_diff   = float('inf')
 
-        log(f"🔍 {option_type} scan | Spot:{spot:.0f} | Expiry:{expiry}")
-
         for option in data['data']:
-            opt_data = option.get('put_options' if option_type == "PUT" else 'call_options', {})
+            opt_data   = option.get('put_options' if option_type == "PUT" else 'call_options', {})
             if not opt_data:
                 continue
-
             greeks     = opt_data.get('option_greeks', {})
             delta      = greeks.get('delta', 0)
             premium    = opt_data.get('market_data', {}).get('ltp', 0)
@@ -169,49 +167,33 @@ def get_option_strike(option_type="PUT"):
             if not instrument or premium <= 0:
                 continue
 
-            # Spot se distance check
             if option_type == "CALL":
-                # CALL: Spot se 200-800 upar
-                strike_ok = (spot + 200) <= strike <= (spot + 800)
-                delta_ok  = CALL_DELTA_MIN <= delta <= CALL_DELTA_MAX
+                # CALL: Spot ke upar ka strike - OTM
+                if strike > spot:
+                    diff = strike - spot  # Spot se kitna upar
+                    if diff < best_diff:
+                        best_diff       = diff
+                        best_strike     = strike
+                        best_delta      = delta
+                        best_premium    = premium
+                        best_instrument = instrument
             else:
-                # PUT: Spot se 200-800 neeche
-                strike_ok = (spot - 800) <= strike <= (spot - 200)
-                delta_ok  = PUT_DELTA_MIN <= delta <= PUT_DELTA_MAX
-
-            in_range = delta_ok or strike_ok  # Dono mein se koi bhi
-
-            log(f"   Strike:{strike} | Delta:{delta:.3f} | Premium:₹{premium} | StrikeOK:{strike_ok} | DeltaOK:{delta_ok}")
-
-            if in_range:
-                # Delta milta hai to delta se select karo
-                # Nahi milta to spot distance se
-                if delta_ok:
-                    target = 0.24 if option_type == "CALL" else -0.24
-                    diff = abs(delta - target)
-                else:
-                    # Spot ke sabse paas wala OTM strike
-                    diff = abs(strike - spot)
-
-                if diff < best_diff:
-                    best_diff       = diff
-                    best_strike     = strike
-                    best_delta      = delta
-                    best_premium    = premium
-                    best_instrument = instrument
+                # PUT: Spot ke neeche ka strike - OTM
+                if strike < spot:
+                    diff = spot - strike  # Spot se kitna neeche
+                    if diff < best_diff:
+                        best_diff       = diff
+                        best_strike     = strike
+                        best_delta      = delta
+                        best_premium    = premium
+                        best_instrument = instrument
 
         if best_strike is None:
-            log(f"⚠️ {option_type} delta range mein koi strike nahi mila!")
-            log(f"⚠️ Spot:{spot:.0f} | Range: {'0.18-0.30' if option_type=='CALL' else '-0.30 to -0.18'}")
-            send_alert(
-                f"⚠️ <b>{option_type} Strike nahi mila!</b>\n"
-                f"Spot: {spot:.0f}\n"
-                f"Delta range: {'0.18-0.30' if option_type=='CALL' else '-0.30 to -0.18'}\n"
-                f"Expiry: {expiry}"
-            )
+            log(f"⚠️ {option_type} strike nahi mila! Spot:{spot:.0f}")
+            send_alert(f"⚠️ <b>{option_type} Strike nahi mila!</b>\nSpot: {spot:.0f}")
             return None, None, None, None
 
-        log(f"✅ {option_type} | Strike:{best_strike} | Delta:{best_delta:.3f} | Premium:₹{best_premium}")
+        log(f"✅ {option_type} | Strike:{best_strike} | Delta:{best_delta:.3f} | Premium:₹{best_premium} | OTM:{best_diff:.0f} pts")
         return best_strike, best_delta, best_premium, best_instrument
 
     except Exception as e:
