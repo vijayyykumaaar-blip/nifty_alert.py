@@ -22,13 +22,6 @@ MARKET_CLOSE = dtime(23, 30)
 FUT_KEY = "MCX_FO|487466"
 
 # =============================================
-# GLOBALS
-# =============================================
-mother_candle = None
-body_top = None
-body_bottom = None
-
-# =============================================
 # HELPERS
 # =============================================
 def log(msg):
@@ -37,7 +30,7 @@ def log(msg):
 def send_alert(msg):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}
+        payload = {"chat_id": CHAT_ID, "text": msg}
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         log(f"Alert error: {e}")
@@ -94,9 +87,9 @@ def get_candles():
 # MAIN
 # =============================================
 def main():
-    global mother_candle, body_top, body_bottom
+    prev_count = 0
 
-    log("🚀 Commodity Algo Started")
+    log("🚀 Candle Debug Mode Started")
 
     while True:
         try:
@@ -109,41 +102,32 @@ def main():
                 time.sleep(5)
                 continue
 
-            # ============================
-            # MOTHER CANDLE FIX
-            # ============================
-            if mother_candle is None:
-                if len(candles) >= 1:
-                    mother_candle = candles[0]
+            # new candle detect
+            if len(candles) > prev_count:
+                prev_count = len(candles)
 
-                    body_top = max(mother_candle["open"], mother_candle["close"])
-                    body_bottom = min(mother_candle["open"], mother_candle["close"])
+                if len(candles) < 2:
+                    continue
 
-                    log(f"Mother Candle Set: {body_top} / {body_bottom}")
+                # 🔥 CLOSED CANDLE ONLY
+                c = candles[-2]
 
-                    send_alert(
-                        f"📊 Mother Candle\n"
-                        f"Open: {mother_candle['open']}\n"
-                        f"High: {mother_candle['high']}\n"
-                        f"Low: {mother_candle['low']}\n"
-                        f"Close: {mother_candle['close']}"
-                    )
+                log(
+                    f"NEW CLOSED → "
+                    f"O:{c['open']} "
+                    f"H:{c['high']} "
+                    f"L:{c['low']} "
+                    f"C:{c['close']}"
+                )
 
-            # ============================
-            # CLOSED CANDLE ONLY
-            # ============================
-            if len(candles) < 2:
-                time.sleep(5)
-                continue
-
-            last_closed = candles[-2]
-
-            log(
-                f"CLOSED → O:{last_closed['open']} "
-                f"H:{last_closed['high']} "
-                f"L:{last_closed['low']} "
-                f"C:{last_closed['close']}"
-            )
+                send_alert(
+                    f"📊 Candle Closed\n\n"
+                    f"Time: {c['time']}\n"
+                    f"Open: {c['open']}\n"
+                    f"High: {c['high']}\n"
+                    f"Low: {c['low']}\n"
+                    f"Close: {c['close']}"
+                )
 
         except Exception as e:
             log(f"ERROR: {e}")
