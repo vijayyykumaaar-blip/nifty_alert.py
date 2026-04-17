@@ -101,7 +101,7 @@ def main():
                 continue
 
             # CLOSED candle
-            c = candles[-1]
+            c = candles[-0]
 
             # 🔥 DUPLICATE BLOCK FIX
             if c["time"] == last_processed_time:
