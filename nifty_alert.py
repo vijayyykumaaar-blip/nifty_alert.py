@@ -7,9 +7,7 @@ import pytz
 
 sys.stdout.flush()
 
-# =============================================
 # CONFIG
-# =============================================
 TELEGRAM_TOKEN = "YOUR_TOKEN"
 CHAT_ID        = "YOUR_CHAT_ID"
 UPSTOX_TOKEN   = os.environ.get("UPSTOX_TOKEN")
@@ -87,9 +85,9 @@ def get_candles():
 # MAIN
 # =============================================
 def main():
-    prev_count = 0
+    last_processed_time = None
 
-    log("🚀 Candle Debug Mode Started")
+    log("🚀 Stable Candle Debug Mode Started")
 
     while True:
         try:
@@ -98,42 +96,42 @@ def main():
                 continue
 
             candles = get_candles()
-            if not candles:
+            if not candles or len(candles) < 2:
                 time.sleep(5)
                 continue
 
-            # new candle detect
-            if len(candles) > prev_count:
-                prev_count = len(candles)
+            # CLOSED candle
+            c = candles[-2]
 
-                if len(candles) < 2:
-                    continue
+            # 🔥 DUPLICATE BLOCK FIX
+            if c["time"] == last_processed_time:
+                time.sleep(5)
+                continue
 
-                # 🔥 CLOSED CANDLE ONLY
-                c = candles[-2]
+            last_processed_time = c["time"]
 
-                log(
-                    f"NEW CLOSED → "
-                    f"O:{c['open']} "
-                    f"H:{c['high']} "
-                    f"L:{c['low']} "
-                    f"C:{c['close']}"
-                )
+            log(
+                f"NEW CLOSED → "
+                f"O:{c['open']} "
+                f"H:{c['high']} "
+                f"L:{c['low']} "
+                f"C:{c['close']}"
+            )
 
-                send_alert(
-                    f"📊 Candle Closed\n\n"
-                    f"Time: {c['time']}\n"
-                    f"Open: {c['open']}\n"
-                    f"High: {c['high']}\n"
-                    f"Low: {c['low']}\n"
-                    f"Close: {c['close']}"
-                )
+            send_alert(
+                f"📊 Candle Closed\n\n"
+                f"Time: {c['time']}\n"
+                f"Open: {c['open']}\n"
+                f"High: {c['high']}\n"
+                f"Low: {c['low']}\n"
+                f"Close: {c['close']}"
+            )
 
         except Exception as e:
             log(f"ERROR: {e}")
             time.sleep(5)
 
-        time.sleep(5)
+        time.sleep(10)
 
 # =============================================
 # RUN
